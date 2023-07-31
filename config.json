@@ -1,14 +1,13 @@
 {
-    "name": "Mnist_LeNet",
+    "name": "custom_tranfomrer",
     "n_gpu": 1,
-
     "arch": {
-        "type": "MnistModel",
+        "type": "Transformer",
         "args": {}
     },
     "data_loader": {
-        "type": "MnistDataLoader",
-        "args":{
+        "type": "DataLoader",
+        "args": {
             "data_dir": "data/",
             "batch_size": 128,
             "shuffle": true,
@@ -18,15 +17,16 @@
     },
     "optimizer": {
         "type": "Adam",
-        "args":{
-            "lr": 0.001,
+        "args": {
+            "lr": 0.0005,
             "weight_decay": 0,
             "amsgrad": true
         }
     },
-    "loss": "nll_loss",
+    "loss": "cross_entropy",
     "metrics": [
-        "accuracy", "top_k_acc"
+        "accuracy",
+        "top_k_acc"
     ],
     "lr_scheduler": {
         "type": "StepLR",
@@ -37,14 +37,11 @@
     },
     "trainer": {
         "epochs": 100,
-
         "save_dir": "saved/",
         "save_period": 1,
         "verbosity": 2,
-        
         "monitor": "min val_loss",
-        "early_stop": 10,
-
+        "early_stop": 5,
         "tensorboard": true
     }
 }

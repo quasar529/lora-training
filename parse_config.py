@@ -63,10 +63,12 @@ class ConfigParser:
             resume = Path(args.resume)
             cfg_fname = resume.parent / 'config.json'
         else:
-            msg_no_cfg = "Configuration file need to be specified. Add '-c config.json', for example."
-            assert args.config is not None, msg_no_cfg
+            # msg_no_cfg = "Configuration file need to be specified. Add '-c config.json', for example."
+            # assert args.config is not None, msg_no_cfg
+            # resume = None
+            # cfg_fname = Path(args.config)
             resume = None
-            cfg_fname = Path(args.config)
+            cfg_fname = Path("config.json")
         
         config = read_json(cfg_fname)
         if args.config and resume:
