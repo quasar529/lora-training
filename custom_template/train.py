@@ -144,13 +144,30 @@ def main(model_name, EX_type, rank):
         lora.mark_only_lora_as_trainable(model)
     elif EX_type =="4":
         insert_lora(model, HIDDEN_DIM, rank)
-        lora.mark_only_lora_as_trainable(model)
+        
         lora_model = Transformer(enc, dec, SRC_PAD_IDX, TRG_PAD_IDX, device)
-        lora_model.load_state_dict(torch.load( '/content/drive/MyDrive/LAB/V2_lora_W_and_F_frez_dW_train2.pt'),strict=False)
+        insert_lora(lora_model, HIDDEN_DIM, rank)
+        # W_model = Transformer(enc, dec, SRC_PAD_IDX, TRG_PAD_IDX, device)
+        # W_model.load_state_dict(torch.load( '/content/drive/MyDrive/LAB/lora-training/custom_template/checkpoints/base_transformer.pt'),strict=False)
+        # W_weight_copy(lora_model,W_model)
+        lora_model.load_state_dict(torch.load( '/content/drive/MyDrive/LAB/lora-training/custom_template/checkpoints/EX3_LoRA_check_continuity_best_at17.pt'),strict=False)
         W_init_by_lora(model,lora_model)
         make_W_zero(model)
+        lora.mark_only_lora_as_trainable(model)
+        print(f"The {model_name} has {count_parameters(model):,} trainable parameters")
+        
+        print("### CHECK LAYERS WEIGHTS ###")
+        print("W (encoder_q)\n",model.encoder.layers[0].self_attention.fc_q.weight.data)
+        print("encoder_q_LoraA\n",model.encoder.layers[0].self_attention.fc_q.lora_A,"encoder_q_LoraB\n",model.encoder.layers[0].self_attention.fc_q.lora_B)
     elif EX_type == '5':
         insert_lora(model, HIDDEN_DIM, rank)
+        W_model = Transformer(enc, dec, SRC_PAD_IDX, TRG_PAD_IDX, device)
+        W_model.load_state_dict(torch.load( '/content/drive/MyDrive/LAB/lora-training/custom_template/checkpoints/base_transformer.pt'),strict=False)
+        W_weight_copy(model,W_model)
+        W_init_by_SVD(model, W_model,64)
+        
+        lora.mark_only_lora_as_trainable(model)
+
     
     model.to(device)
     optimizer = torch.optim.Adam(model.parameters(), lr=LEARNING_RATE)
@@ -160,9 +177,9 @@ def main(model_name, EX_type, rank):
     scheduler = CosineAnnealingWarmRestarts(optimizer, T_0=25, T_mult=2, eta_min=0.00001)
     
     test_loss = evaluate(model, test_iterator, criterion)
-    print("### CHECK THE CONTINUITY ### \n")
+    print("### CHECK THE CONTINUITY ###")
     print(f'Test Loss: {test_loss:.3f} | Test PPL: {math.exp(test_loss):.3f}')
-    print(f"The {model_name} has {count_parameters(model):,} trainable parameters")
+    
     best_valid_loss = float("inf")
     not_improved_count = 0
     
@@ -195,7 +212,7 @@ def main(model_name, EX_type, rank):
                 "Train PPL": math.exp(train_loss),
                 "Valid Loss": valid_loss,
                 "Valid PPL": math.exp(valid_loss),
-                "LR" : scheduler.get_last_lr()
+                "LR" : scheduler.get_last_lr()[0]
             }
         )
 
