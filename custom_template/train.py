@@ -212,7 +212,7 @@ def main(model_name, EX_type, rank):
                 "Train PPL": math.exp(train_loss),
                 "Valid Loss": valid_loss,
                 "Valid PPL": math.exp(valid_loss),
-                "LR" : scheduler.get_last_lr()[0]
+                "LR" : scheduler.optimizer.param_groups[0]['lr']#scheduler.get_last_lr()[0]
             }
         )
 
