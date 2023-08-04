@@ -13,7 +13,7 @@ class Linear_nodropout(lora.Linear):
 
         if self.r > 0 and not self.merged:
             result = F.linear(x, T(self.weight), bias=self.bias)
-            result += self.lora_A.transpose(0, 1) @ self.lora_B.transpose(0, 1)  # * self.scaling
+            result += x @ self.lora_A.transpose(0, 1) @ self.lora_B.transpose(0, 1)  # * self.scaling
             return result
         else:
             return F.linear(x, T(self.weight), bias=self.bias)
@@ -46,17 +46,17 @@ def insert_lora(model, dim, rank, lora_alpha=1):
         # model.decoder.layers[i].self_attention.fc_v = lora.Linear(
         #     dim, dim, r=rank, lora_alpha=lora_alpha, merge_weights=False
         # )
-        model.encoder.layers[i].self_attention.fc_q = Linear_nodropout(
+        model.encoder.layers[i].self_attention.fc_q = lora.Linear(
             dim, dim, r=rank, lora_alpha=lora_alpha, merge_weights=False
         )
-        model.encoder.layers[i].self_attention.fc_v = Linear_nodropout(
+        model.encoder.layers[i].self_attention.fc_v = lora.Linear(
             dim, dim, r=rank, lora_alpha=lora_alpha, merge_weights=False
         )
 
-        model.decoder.layers[i].self_attention.fc_q = Linear_nodropout(
+        model.decoder.layers[i].self_attention.fc_q = lora.Linear(
             dim, dim, r=rank, lora_alpha=lora_alpha, merge_weights=False
         )
-        model.decoder.layers[i].self_attention.fc_v = Linear_nodropout(
+        model.decoder.layers[i].self_attention.fc_v = lora.Linear(
             dim, dim, r=rank, lora_alpha=lora_alpha, merge_weights=False
         )
 

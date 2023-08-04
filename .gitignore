@@ -114,3 +114,6 @@ __MACOSX/
 wandb
 
 *.pt
+ngrok
+ngrok-stable-linux-amd64.zip
+cloudflared
