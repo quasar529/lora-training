@@ -3,6 +3,20 @@ import math
 import time
 import torch
 import loralib as lora
+import torch.nn.functional as F
+
+
+class Linear_nodropout(lora.Linear):
+    def forward(self, x: torch.Tensor):
+        def T(w):
+            return w.transpose(0, 1) if self.fan_in_fan_out else w
+
+        if self.r > 0 and not self.merged:
+            result = F.linear(x, T(self.weight), bias=self.bias)
+            result += self.lora_A.transpose(0, 1) @ self.lora_B.transpose(0, 1)  # * self.scaling
+            return result
+        else:
+            return F.linear(x, T(self.weight), bias=self.bias)
 
 
 def initialize_weights(m):
@@ -17,13 +31,34 @@ def epoch_time(start_time, end_time):
     return elapsed_mins, elapsed_secs
 
 
-def insert_lora(model, dim, rank):
+def insert_lora(model, dim, rank, lora_alpha=1):
     for i in range(3):
-        model.encoder.layers[i].self_attention.fc_q = lora.Linear(dim, dim, r=rank, merge_weights=False)
-        model.encoder.layers[i].self_attention.fc_v = lora.Linear(dim, dim, r=rank, merge_weights=False)
+        # model.encoder.layers[i].self_attention.fc_q = lora.Linear(
+        #     dim, dim, r=rank, lora_alpha=lora_alpha, merge_weights=False
+        # )
+        # model.encoder.layers[i].self_attention.fc_v = lora.Linear(
+        #     dim, dim, r=rank, lora_alpha=lora_alpha, merge_weights=False
+        # )
 
-        model.decoder.layers[i].self_attention.fc_q = lora.Linear(dim, dim, r=rank, merge_weights=False)
-        model.decoder.layers[i].self_attention.fc_v = lora.Linear(dim, dim, r=rank, merge_weights=False)
+        # model.decoder.layers[i].self_attention.fc_q = lora.Linear(
+        #     dim, dim, r=rank, lora_alpha=lora_alpha, merge_weights=False
+        # )
+        # model.decoder.layers[i].self_attention.fc_v = lora.Linear(
+        #     dim, dim, r=rank, lora_alpha=lora_alpha, merge_weights=False
+        # )
+        model.encoder.layers[i].self_attention.fc_q = Linear_nodropout(
+            dim, dim, r=rank, lora_alpha=lora_alpha, merge_weights=False
+        )
+        model.encoder.layers[i].self_attention.fc_v = Linear_nodropout(
+            dim, dim, r=rank, lora_alpha=lora_alpha, merge_weights=False
+        )
+
+        model.decoder.layers[i].self_attention.fc_q = Linear_nodropout(
+            dim, dim, r=rank, lora_alpha=lora_alpha, merge_weights=False
+        )
+        model.decoder.layers[i].self_attention.fc_v = Linear_nodropout(
+            dim, dim, r=rank, lora_alpha=lora_alpha, merge_weights=False
+        )
 
 
 def count_parameters(model):
@@ -38,9 +73,10 @@ def make_W_zero(model):
             model.decoder.layers[i].self_attention.fc_q.weight.data.zero_()
             model.decoder.layers[i].self_attention.fc_v.weight.data.zero_()
 
+
 def W_weight_copy(new_model, W_model):
     q_encoder_weight_list = []
-    v_encoder_weight_list =[]
+    v_encoder_weight_list = []
 
     q_decoder_weight_list = []
     v_decoder_weight_list = []
@@ -62,6 +98,7 @@ def W_weight_copy(new_model, W_model):
 
             new_model.decoder.layers[i].self_attention.fc_q.weight.data.copy_(q_decoder_weight_list[i])
             new_model.decoder.layers[i].self_attention.fc_v.weight.data.copy_(v_decoder_weight_list[i])
+
 
 def W_init_by_lora(base_model, lora_model):
     """
@@ -113,6 +150,10 @@ def W_init_by_lora(base_model, lora_model):
             base_model.decoder.layers[i].self_attention.fc_v.lora_B.copy_(loraB_v_decoder_weight_list[i])
 
 
+def recon_error(original_weight, approx_weight):
+    return torch.linalg.norm(original_weight - approx_weight, "fro")
+
+
 def W_init_by_SVD(base_model, SVD_model, rank):
     w_q_encoder_loraA_weights = []
     w_q_encoder_loraB_weights = []
@@ -140,48 +181,72 @@ def W_init_by_SVD(base_model, SVD_model, rank):
             decoder_q_u, decoder_q_s, decoder_q_v = torch.linalg.svd(decoder_q_original_weight)
             decoder_v_u, decoder_v_s, decoder_v_v = torch.linalg.svd(decoder_v_original_weight)
 
-            approx_rank = 64
+            approx_rank = rank
             # w_q_encoder
             w_q_encoder_loraA_weights.append(
                 encoder_q_u[:, :approx_rank] @ torch.diag(encoder_q_s[:approx_rank]).sqrt()
-            )
+            )  # torch.Size([256, 64])
             w_q_encoder_loraB_weights.append(
-                torch.diag(encoder_q_s[:approx_rank]).sqrt() @ encoder_q_v[:, :approx_rank].T
-            )
+                torch.diag(encoder_q_s[:approx_rank]).sqrt() @ encoder_q_v[:approx_rank, :]
+            )  # torch.Size([64, 256])
             # w_v_encoder
             w_v_encoder_loraA_weights.append(
                 encoder_v_u[:, :approx_rank] @ torch.diag(encoder_v_s[:approx_rank]).sqrt()
             )
             w_v_encoder_loraB_weights.append(
-                torch.diag(encoder_v_s[:approx_rank]).sqrt() @ encoder_v_v[:, :approx_rank].T
+                torch.diag(encoder_v_s[:approx_rank]).sqrt() @ encoder_v_v[:approx_rank, :]
             )
             # w_q_decoder
             w_q_decoder_loraA_weights.append(
                 decoder_q_u[:, :approx_rank] @ torch.diag(decoder_q_s[:approx_rank]).sqrt()
             )
             w_q_decoder_loraB_weights.append(
-                torch.diag(decoder_q_s[:approx_rank]).sqrt() @ decoder_q_v[:, :approx_rank].T
+                torch.diag(decoder_q_s[:approx_rank]).sqrt() @ decoder_q_v[:approx_rank, :]
             )
             # w_v_decoder
             w_v_decoder_loraA_weights.append(
                 decoder_v_u[:, :approx_rank] @ torch.diag(decoder_v_s[:approx_rank]).sqrt()
             )
             w_v_decoder_loraB_weights.append(
-                torch.diag(decoder_v_s[:approx_rank]).sqrt() @ decoder_v_v[:, :approx_rank].T
+                torch.diag(decoder_v_s[:approx_rank]).sqrt() @ decoder_v_v[:approx_rank, :]
             )
-
+            # u : 256*64, V_t: 64*256
             # lora_A = u[:, :approx_rank] @ torch.diag(s[:approx_rank]).sqrt()  # 크기: 256x64
             # lora_B = torch.diag(s[:approx_rank]).sqrt() @ v[:, :approx_rank].T  # 크기: 64x256
     with torch.no_grad():
         for i in range(3):
-            base_model.encoder.layers[i].self_attention.fc_q.lora_A.copy_(w_q_encoder_loraB_weights[i])
-            base_model.encoder.layers[i].self_attention.fc_q.lora_B.copy_(w_q_encoder_loraA_weights[i])
+            # base_model.encoder.layers[i].self_attention.fc_q.lora_A.copy_(w_q_encoder_loraA_weights[i].transpose(0, 1))
+            # base_model.encoder.layers[i].self_attention.fc_q.lora_B.copy_(w_q_encoder_loraB_weights[i].transpose(0, 1))
 
-            base_model.encoder.layers[i].self_attention.fc_v.lora_A.copy_(w_v_encoder_loraB_weights[i])
-            base_model.encoder.layers[i].self_attention.fc_v.lora_B.copy_(w_v_encoder_loraA_weights[i])
+            # base_model.encoder.layers[i].self_attention.fc_v.lora_A.copy_(w_v_encoder_loraA_weights[i].transpose(0, 1))
+            # base_model.encoder.layers[i].self_attention.fc_v.lora_B.copy_(w_v_encoder_loraB_weights[i].transpose(0, 1))
 
-            base_model.decoder.layers[i].self_attention.fc_q.lora_A.copy_(w_q_decoder_loraB_weights[i])
-            base_model.decoder.layers[i].self_attention.fc_q.lora_B.copy_(w_q_decoder_loraA_weights[i])
+            # base_model.decoder.layers[i].self_attention.fc_q.lora_A.copy_(w_q_decoder_loraA_weights[i].transpose(0, 1))
+            # base_model.decoder.layers[i].self_attention.fc_q.lora_B.copy_(w_q_decoder_loraB_weights[i].transpose(0, 1))
 
-            base_model.decoder.layers[i].self_attention.fc_v.lora_A.copy_(w_v_decoder_loraB_weights[i])
-            base_model.decoder.layers[i].self_attention.fc_v.lora_B.copy_(w_q_decoder_loraA_weights[i])
+            # base_model.decoder.layers[i].self_attention.fc_v.lora_A.copy_(w_v_decoder_loraA_weights[i].transpose(0, 1))
+            # base_model.decoder.layers[i].self_attention.fc_v.lora_B.copy_(w_q_decoder_loraB_weights[i].transpose(0, 1))
+            base_model.encoder.layers[i].self_attention.fc_q.lora_A.copy_(w_q_encoder_loraA_weights[i].transpose(0, 1))
+            base_model.encoder.layers[i].self_attention.fc_q.lora_B.copy_(w_q_encoder_loraB_weights[i].transpose(0, 1))
+
+            base_model.encoder.layers[i].self_attention.fc_v.lora_A.copy_(w_v_encoder_loraA_weights[i].transpose(0, 1))
+            base_model.encoder.layers[i].self_attention.fc_v.lora_B.copy_(w_v_encoder_loraB_weights[i].transpose(0, 1))
+
+            base_model.decoder.layers[i].self_attention.fc_q.lora_A.copy_(w_q_decoder_loraA_weights[i].transpose(0, 1))
+            base_model.decoder.layers[i].self_attention.fc_q.lora_B.copy_(w_q_decoder_loraB_weights[i].transpose(0, 1))
+
+            base_model.decoder.layers[i].self_attention.fc_v.lora_A.copy_(w_v_decoder_loraA_weights[i].transpose(0, 1))
+            base_model.decoder.layers[i].self_attention.fc_v.lora_B.copy_(w_v_decoder_loraB_weights[i].transpose(0, 1))
+
+            print(
+                recon_error(
+                    SVD_model.encoder.layers[i].self_attention.fc_q.weight,
+                    w_q_encoder_loraA_weights[i] @ w_q_encoder_loraB_weights[i],
+                )
+            )
+            print(
+                recon_error(
+                    SVD_model.decoder.layers[i].self_attention.fc_v.weight,
+                    w_v_decoder_loraA_weights[i] @ w_v_decoder_loraB_weights[i],
+                )
+            )
