@@ -250,7 +250,7 @@ class Decoder(nn.Module):
             [DecoderLayer(hidden_dim, n_heads, pf_dim, dropout_ratio, device) for _ in range(n_layers)]
         )
 
-        self.fc_out = nn.Linear(hidden_dim, output_dim)
+        self.fc_out = nn.Linear(hidden_dim, output_dim, bias=False)
 
         self.dropout = nn.Dropout(dropout_ratio)
 

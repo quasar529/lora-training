@@ -7,6 +7,7 @@ import torch.nn.functional as F
 from lora_layers import Linear as lora_linear
 import copy
 
+
 def initialize_weights(m):
     if hasattr(m, "weight") and m.weight.dim() > 1:
         nn.init.xavier_uniform_(m.weight.data)
@@ -22,19 +23,19 @@ def epoch_time(start_time, end_time):
 def insert_lora(model, dim, rank, lora_alpha=1):
     len_of_layers = len(model.encoder.layers)
     for i in range(len_of_layers):
-        model.encoder.layers[i].self_attention.fc_q = copy.deepcopy(lora_linear(
-            dim, dim, r=rank, lora_alpha=lora_alpha, merge_weights=False
-        ))
-        model.encoder.layers[i].self_attention.fc_v = copy.deepcopy(lora_linear(
-            dim, dim, r=rank, lora_alpha=lora_alpha, merge_weights=False
-        ))
+        model.encoder.layers[i].self_attention.fc_q = copy.deepcopy(
+            lora_linear(dim, dim, r=rank, lora_alpha=lora_alpha, merge_weights=True)
+        )
+        model.encoder.layers[i].self_attention.fc_v = copy.deepcopy(
+            lora_linear(dim, dim, r=rank, lora_alpha=lora_alpha, merge_weights=True)
+        )
 
-        model.decoder.layers[i].self_attention.fc_q = copy.deepcopy(lora_linear(
-            dim, dim, r=rank, lora_alpha=lora_alpha, merge_weights=False
-        ))
-        model.decoder.layers[i].self_attention.fc_v = copy.deepcopy(lora_linear(
-            dim, dim, r=rank, lora_alpha=lora_alpha, merge_weights=False
-        ))
+        model.decoder.layers[i].self_attention.fc_q = copy.deepcopy(
+            lora_linear(dim, dim, r=rank, lora_alpha=lora_alpha, merge_weights=True)
+        )
+        model.decoder.layers[i].self_attention.fc_v = copy.deepcopy(
+            lora_linear(dim, dim, r=rank, lora_alpha=lora_alpha, merge_weights=True)
+        )
 
 
 def count_parameters(model):

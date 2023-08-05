@@ -98,12 +98,17 @@ def main():
         torch.load("/content/drive/MyDrive/LAB/lora-training/custom_template/checkpoints/base_transformer_copy.pt"),
         strict=False,
     )
+    w_criterion = nn.CrossEntropyLoss(ignore_index=TRG_PAD_IDX)
+    w_model.to(device)
+    w_test_loss = evaluate(w_model, test_iterator, w_criterion)
+    print("Base Transformer")
+    print(f"Test Loss: {w_test_loss:.3f} | Test PPL: {math.exp(w_test_loss):.3f}")
 
     rank = 64
     insert_lora(model, HIDDEN_DIM, rank)
     make_W_zero(model)
 
-    W_init_by_SVD(model, w_model, rank)
+    # W_init_by_SVD(model, w_model, rank)
 
     # make_W_zero(model)
     # W svd
@@ -178,6 +183,31 @@ def main():
 
             approx_rank = rank
 
+            model.encoder.layers[i].self_attention.fc_q.lora_A.copy_(
+                (encoder_q_u[:, :approx_rank] @ torch.diag(encoder_q_s[:approx_rank]).sqrt()).T
+            )
+            model.encoder.layers[i].self_attention.fc_q.lora_B.copy_(
+                (torch.diag(encoder_q_s[:approx_rank]).sqrt() @ encoder_q_v[:approx_rank, :]).T
+            )
+            model.encoder.layers[i].self_attention.fc_v.lora_A.copy_(
+                (encoder_v_u[:, :approx_rank] @ torch.diag(encoder_v_s[:approx_rank]).sqrt()).T
+            )
+            model.encoder.layers[i].self_attention.fc_v.lora_B.copy_(
+                (torch.diag(encoder_v_s[:approx_rank]).sqrt() @ encoder_v_v[:approx_rank, :]).T
+            )
+
+            model.decoder.layers[i].self_attention.fc_q.lora_A.copy_(
+                (decoder_q_u[:, :approx_rank] @ torch.diag(decoder_q_s[:approx_rank]).sqrt()).T
+            )
+            model.decoder.layers[i].self_attention.fc_q.lora_B.copy_(
+                (torch.diag(decoder_q_s[:approx_rank]).sqrt() @ decoder_q_v[:approx_rank, :]).T
+            )
+            model.decoder.layers[i].self_attention.fc_v.lora_A.copy_(
+                (decoder_v_u[:, :approx_rank] @ torch.diag(decoder_v_s[:approx_rank]).sqrt()).T
+            )
+            model.decoder.layers[i].self_attention.fc_v.lora_B.copy_(
+                (torch.diag(decoder_v_s[:approx_rank]).sqrt() @ decoder_v_v[:approx_rank, :]).T
+            )
             # model.encoder.layers[i].self_attention.fc_q.weight.copy_(encoder_q_u @ torch.diag(encoder_q_s).sqrt()) @ encoder_q_v) #= encoder_q_u @ torch.diag(encoder_q_s) @ encoder_q_v
             # model.encoder.layers[i].self_attention.fc_v.weight.copy_(encoder_v_u @ torch.diag(encoder_v_s) @ encoder_v_v)#.data = encoder_v_u @ torch.diag(encoder_v_s) @ encoder_v_v
             # model.decoder.layers[i].self_attention.fc_q.weight.copy_(decoder_q_u @ torch.diag(decoder_q_s) @ decoder_q_v)#.data = decoder_q_u @ torch.diag(decoder_q_s) @ decoder_q_v
@@ -285,18 +315,18 @@ def main():
     #         base_model.decoder.layers[i].self_attention.fc_v.lora_A.copy_(w_v_decoder_loraA_weights[i].transpose(0, 1))
     #         base_model.decoder.layers[i].self_attention.fc_v.lora_B.copy_(w_v_decoder_loraB_weights[i].transpose(0, 1))
     # W_init_by_SVD(model, w_model, 2)
-
+    model.eval()
     criterion = nn.CrossEntropyLoss(ignore_index=TRG_PAD_IDX)
     model.to(device)
     test_loss = evaluate(model, test_iterator, criterion)
-    print("### CHECK THE CONTINUITY ### \n model")
+    print("model")
     print(f"Test Loss: {test_loss:.3f} | Test PPL: {math.exp(test_loss):.3f}")
 
-    # 뒷 부분의 패딩(padding)에 대해서는 값 무시
+    w_model.eval()
     w_criterion = nn.CrossEntropyLoss(ignore_index=TRG_PAD_IDX)
     w_model.to(device)
     w_test_loss = evaluate(w_model, test_iterator, w_criterion)
-    print("### CHECK THE CONTINUITY ### \n w_model")
+    print("w_model")
     print(f"Test Loss: {w_test_loss:.3f} | Test PPL: {math.exp(w_test_loss):.3f}")
 
 

@@ -151,7 +151,7 @@ class Linear(nn.Linear, LoRALayer):
 
         if self.r > 0 and not self.merged:
             result = F.linear(x, T(self.weight), None)
-            result = x @ self.lora_A.transpose(0, 1) @ self.lora_B.transpose(0, 1) * self.scaling
+            result = (x @ self.lora_A.transpose(0, 1) @ self.lora_B.transpose(0, 1)) * self.scaling
             return result
         else:
             return F.linear(x, T(self.weight), None)
