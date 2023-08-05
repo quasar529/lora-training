@@ -231,6 +231,13 @@ def main(model_name, EX_type, rank):
             model.encoder.layers[0].self_attention.fc_q.lora_B,
         )
     elif EX_type == "5":
+        """
+        W*를 SVD로 r = rank로 A,B로 분해한 후 W에 A@B를 넣어준다.
+        단 이 때, 추후 진행할 5-1,5-2 실험에서는 lora layer를 사용하므로
+        실험에 통일성을 지키기 위해
+        W=0 으로 초기화 후 fix 하고,
+        dW = A @ B, 즉 LoRA_A = A, LoRA_B = B로 초기화해 LoRA를 학습시킨다.
+        """
         model.load_state_dict(
             torch.load("/content/drive/MyDrive/LAB/lora-training/custom_template/checkpoints/base_transformer.pt"),
             strict=False,
@@ -266,15 +273,47 @@ def main(model_name, EX_type, rank):
             ),
         )
     elif EX_type == "5_2":
-        insert_lora(model, HIDDEN_DIM, rank)
-        W_model = Transformer(enc, dec, SRC_PAD_IDX, TRG_PAD_IDX, device)
-        W_model.load_state_dict(
+        model.load_state_dict(
             torch.load("/content/drive/MyDrive/LAB/lora-training/custom_template/checkpoints/base_transformer.pt"),
             strict=False,
         )
-        W_weight_copy(model, W_model)
-        W_init_by_SVD(model, W_model, rank)
+
+        with torch.no_grad():
+            for i in range(3):
+                encoder_q_original_weight = model.encoder.layers[i].self_attention.fc_q.weight.data
+                encoder_v_original_weight = model.encoder.layers[i].self_attention.fc_v.weight.data
+
+                decoder_q_original_weight = model.decoder.layers[i].self_attention.fc_q.weight.data
+                decoder_v_original_weight = model.decoder.layers[i].self_attention.fc_v.weight.data
+
+                encoder_q_u, encoder_q_s, encoder_q_v = torch.linalg.svd(encoder_q_original_weight)
+                encoder_v_u, encoder_v_s, encoder_v_v = torch.linalg.svd(encoder_v_original_weight)
+
+                decoder_q_u, decoder_q_s, decoder_q_v = torch.linalg.svd(decoder_q_original_weight)
+                decoder_v_u, decoder_v_s, decoder_v_v = torch.linalg.svd(decoder_v_original_weight)
         make_W_zero(model)
+        with torch.no_grad():
+            for i in range(3):
+                approx_rank = 32
+                # W = low rank W
+                model.encoder.layers[i].self_attention.fc_q.weight.copy_(
+                    (encoder_q_u[:, :approx_rank] @ torch.diag(encoder_q_s[:approx_rank]).sqrt())
+                    @ (torch.diag(encoder_q_s[:approx_rank]).sqrt() @ encoder_q_v[:approx_rank, :])
+                )  # = encoder_q_u @ torch.diag(encoder_q_s) @ encoder_q_v
+                model.encoder.layers[i].self_attention.fc_v.weight.copy_(
+                    (encoder_v_u[:, :approx_rank] @ torch.diag(encoder_v_s[:approx_rank]).sqrt())
+                    @ (torch.diag(encoder_v_s[:approx_rank]).sqrt() @ encoder_v_v[:approx_rank, :])
+                )  # .data = encoder_v_u @ torch.diag(encoder_v_s) @ encoder_v_v
+                model.decoder.layers[i].self_attention.fc_q.weight.copy_(
+                    (decoder_q_u[:, :approx_rank] @ torch.diag(decoder_q_s[:approx_rank]).sqrt())
+                    @ (torch.diag(decoder_q_s[:approx_rank]).sqrt() @ decoder_q_v[:approx_rank, :])
+                )
+                model.decoder.layers[i].self_attention.fc_v.weight.copy_(
+                    (decoder_v_u[:, :approx_rank] @ torch.diag(decoder_v_s[:approx_rank]).sqrt())
+                    @ (torch.diag(decoder_v_s[:approx_rank]).sqrt() @ decoder_v_v[:approx_rank, :])
+                )
+
+        insert_lora(model, HIDDEN_DIM, 32)
         lora.mark_only_lora_as_trainable(model)
 
         print("### CHECK LAYERS WEIGHTS ###")
@@ -290,13 +329,13 @@ def main(model_name, EX_type, rank):
     optimizer = torch.optim.Adam(model.parameters(), lr=LEARNING_RATE)
 
     # 뒷 부분의 패딩(padding)에 대해서는 값 무시
-    # criterion = nn.CrossEntropyLoss(ignore_index=TRG_PAD_IDX)
-    # scheduler = CosineAnnealingWarmRestarts(optimizer, T_0=25, T_mult=2, eta_min=0.00001)
+    criterion = nn.CrossEntropyLoss(ignore_index=TRG_PAD_IDX)
+    scheduler = CosineAnnealingWarmRestarts(optimizer, T_0=25, T_mult=2, eta_min=0.00001)
 
-    # criterion = nn.CrossEntropyLoss(ignore_index=TRG_PAD_IDX)
-    # test_loss = evaluate(model, test_iterator, criterion)
-    # print("### CHECK THE CONTINUITY ###")
-    # print(f"Test Loss: {test_loss:.3f} | Test PPL: {math.exp(test_loss):.3f}")
+    criterion = nn.CrossEntropyLoss(ignore_index=TRG_PAD_IDX)
+    test_loss = evaluate(model, test_iterator, criterion)
+    print("### CHECK THE CONTINUITY ###")
+    print(f"Test Loss: {test_loss:.3f} | Test PPL: {math.exp(test_loss):.3f}")
     # wandb.log({"Test Loss": test_loss, "Test PPL": math.exp(test_loss)})
     # best_valid_loss = float("inf")
     # not_improved_count = 0
@@ -341,7 +380,7 @@ def main(model_name, EX_type, rank):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Lora Training")
-    parser.add_argument("-m", "--model", default="ex5Transformer", type=str, help="Model Name")
+    parser.add_argument("-m", "--model", default="EX5_LoRA_initbySVD", type=str, help="Model Name")
     parser.add_argument("-e", "--EX_type", default="5", type=str, help="Type of Experiment")
     parser.add_argument("-r", "--rank", default=64, type=int, help="Rank of LoRA")
     args = parser.parse_args()

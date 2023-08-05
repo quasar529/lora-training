@@ -22,7 +22,7 @@ class MultiHeadAttentionLayer(nn.Module):
         # self.fc_v= lora.Linear(hidden_dim, hidden_dim, r=64, merge_weights =False)
         ###
 
-        self.fc_o = nn.Linear(hidden_dim, hidden_dim)
+        self.fc_o = nn.Linear(hidden_dim, hidden_dim, bias=False)
 
         self.dropout = nn.Dropout(dropout_ratio)
 

@@ -4,20 +4,8 @@ import time
 import torch
 import loralib as lora
 import torch.nn.functional as F
-
-
-class Linear_nodropout(lora.Linear):
-    def forward(self, x: torch.Tensor):
-        def T(w):
-            return w.transpose(0, 1) if self.fan_in_fan_out else w
-
-        if self.r > 0 and not self.merged:
-            result = F.linear(x, T(self.weight), bias=self.bias)
-            result += x @ self.lora_A.transpose(0, 1) @ self.lora_B.transpose(0, 1)  # * self.scaling
-            return result
-        else:
-            return F.linear(x, T(self.weight), bias=self.bias)
-
+from lora_layers import Linear as lora_linear
+import copy
 
 def initialize_weights(m):
     if hasattr(m, "weight") and m.weight.dim() > 1:
@@ -32,33 +20,21 @@ def epoch_time(start_time, end_time):
 
 
 def insert_lora(model, dim, rank, lora_alpha=1):
-    for i in range(3):
-        # model.encoder.layers[i].self_attention.fc_q = lora.Linear(
-        #     dim, dim, r=rank, lora_alpha=lora_alpha, merge_weights=False
-        # )
-        # model.encoder.layers[i].self_attention.fc_v = lora.Linear(
-        #     dim, dim, r=rank, lora_alpha=lora_alpha, merge_weights=False
-        # )
+    len_of_layers = len(model.encoder.layers)
+    for i in range(len_of_layers):
+        model.encoder.layers[i].self_attention.fc_q = copy.deepcopy(lora_linear(
+            dim, dim, r=rank, lora_alpha=lora_alpha, merge_weights=False
+        ))
+        model.encoder.layers[i].self_attention.fc_v = copy.deepcopy(lora_linear(
+            dim, dim, r=rank, lora_alpha=lora_alpha, merge_weights=False
+        ))
 
-        # model.decoder.layers[i].self_attention.fc_q = lora.Linear(
-        #     dim, dim, r=rank, lora_alpha=lora_alpha, merge_weights=False
-        # )
-        # model.decoder.layers[i].self_attention.fc_v = lora.Linear(
-        #     dim, dim, r=rank, lora_alpha=lora_alpha, merge_weights=False
-        # )
-        model.encoder.layers[i].self_attention.fc_q = lora.Linear(
+        model.decoder.layers[i].self_attention.fc_q = copy.deepcopy(lora_linear(
             dim, dim, r=rank, lora_alpha=lora_alpha, merge_weights=False
-        )
-        model.encoder.layers[i].self_attention.fc_v = lora.Linear(
+        ))
+        model.decoder.layers[i].self_attention.fc_v = copy.deepcopy(lora_linear(
             dim, dim, r=rank, lora_alpha=lora_alpha, merge_weights=False
-        )
-
-        model.decoder.layers[i].self_attention.fc_q = lora.Linear(
-            dim, dim, r=rank, lora_alpha=lora_alpha, merge_weights=False
-        )
-        model.decoder.layers[i].self_attention.fc_v = lora.Linear(
-            dim, dim, r=rank, lora_alpha=lora_alpha, merge_weights=False
-        )
+        ))
 
 
 def count_parameters(model):
@@ -66,8 +42,9 @@ def count_parameters(model):
 
 
 def make_W_zero(model):
+    len_of_layers = len(model.encoder.layers)
     with torch.no_grad():
-        for i in range(3):
+        for i in range(len_of_layers):
             model.encoder.layers[i].self_attention.fc_q.weight.data.zero_()
             model.encoder.layers[i].self_attention.fc_v.weight.data.zero_()
             model.decoder.layers[i].self_attention.fc_q.weight.data.zero_()
@@ -75,13 +52,14 @@ def make_W_zero(model):
 
 
 def W_weight_copy(new_model, W_model):
+    len_of_layers = len(new_model.encoder.layers)
     q_encoder_weight_list = []
     v_encoder_weight_list = []
 
     q_decoder_weight_list = []
     v_decoder_weight_list = []
 
-    for i in range(3):
+    for i in range(len_of_layers):
         q_encoder_new_weight = W_model.encoder.layers[i].self_attention.fc_q.weight.data
         q_encoder_weight_list.append(q_encoder_new_weight)
         v_encoder_new_weight = W_model.encoder.layers[i].self_attention.fc_v.weight.data
@@ -92,7 +70,7 @@ def W_weight_copy(new_model, W_model):
         v_decoder_new_weight = W_model.decoder.layers[i].self_attention.fc_v.weight.data
         v_decoder_weight_list.append(v_decoder_new_weight)
     with torch.no_grad():
-        for i in range(3):
+        for i in range(len_of_layers):
             new_model.encoder.layers[i].self_attention.fc_q.weight.data.copy_(q_encoder_weight_list[i])
             new_model.encoder.layers[i].self_attention.fc_v.weight.data.copy_(v_encoder_weight_list[i])
 
@@ -104,6 +82,7 @@ def W_init_by_lora(base_model, lora_model):
     """
     base_model의 W weight를 lora_model의 Lora Layer의 weight로 초기화
     """
+    len_of_layers = len(base_model.encoder.layers)
     loraA_q_encoder_weight_list = []
     loraB_q_encoder_weight_list = []
 
@@ -116,7 +95,7 @@ def W_init_by_lora(base_model, lora_model):
     loraA_v_decoder_weight_list = []
     loraB_v_decoder_weight_list = []
     with torch.no_grad():
-        for i in range(3):
+        for i in range(len_of_layers):
             loraA_q_encoder_new_weight = lora_model.encoder.layers[i].self_attention.fc_q.lora_A
             loraA_q_encoder_weight_list.append(loraA_q_encoder_new_weight)
             loraB_q_encoder_new_weight = lora_model.encoder.layers[i].self_attention.fc_q.lora_B
@@ -138,7 +117,7 @@ def W_init_by_lora(base_model, lora_model):
             loraB_v_decoder_weight_list.append(loraB_v_decoder_new_weight)
 
     with torch.no_grad():
-        for i in range(3):
+        for i in range(len_of_layers):
             base_model.encoder.layers[i].self_attention.fc_q.lora_A.copy_(loraA_q_encoder_weight_list[i])
             base_model.encoder.layers[i].self_attention.fc_q.lora_B.copy_(loraB_q_encoder_weight_list[i])
             base_model.encoder.layers[i].self_attention.fc_v.lora_A.copy_(loraA_v_encoder_weight_list[i])
@@ -151,7 +130,8 @@ def W_init_by_lora(base_model, lora_model):
 
 
 def recon_error(original_weight, approx_weight):
-    return torch.linalg.norm(original_weight - approx_weight, "fro")
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    return torch.linalg.norm(original_weight.to(device) - approx_weight.to(device), "fro")
 
 
 def W_init_by_SVD(base_model, SVD_model, rank):
@@ -166,9 +146,9 @@ def W_init_by_SVD(base_model, SVD_model, rank):
 
     w_v_decoder_loraA_weights = []
     w_v_decoder_loraB_weights = []
-
+    len_of_layers = len(base_model.encoder.layers)
     with torch.no_grad():
-        for i in range(3):
+        for i in range(len_of_layers):
             encoder_q_original_weight = SVD_model.encoder.layers[i].self_attention.fc_q.weight.data
             encoder_v_original_weight = SVD_model.encoder.layers[i].self_attention.fc_v.weight.data
 
@@ -214,7 +194,7 @@ def W_init_by_SVD(base_model, SVD_model, rank):
             # lora_A = u[:, :approx_rank] @ torch.diag(s[:approx_rank]).sqrt()  # 크기: 256x64
             # lora_B = torch.diag(s[:approx_rank]).sqrt() @ v[:, :approx_rank].T  # 크기: 64x256
     with torch.no_grad():
-        for i in range(3):
+        for i in range(len_of_layers):
             # base_model.encoder.layers[i].self_attention.fc_q.lora_A.copy_(w_q_encoder_loraA_weights[i].transpose(0, 1))
             # base_model.encoder.layers[i].self_attention.fc_q.lora_B.copy_(w_q_encoder_loraB_weights[i].transpose(0, 1))
 
@@ -239,10 +219,19 @@ def W_init_by_SVD(base_model, SVD_model, rank):
             base_model.decoder.layers[i].self_attention.fc_v.lora_B.copy_(w_v_decoder_loraB_weights[i].transpose(0, 1))
 
             print(
+                "model loraA @loraB - 대입 전 계산 결과 값",
+                recon_error(
+                    base_model.encoder.layers[i].self_attention.fc_q.lora_A.T
+                    @ base_model.encoder.layers[i].self_attention.fc_q.lora_B.T,
+                    w_q_encoder_loraA_weights[i] @ w_q_encoder_loraB_weights[i],
+                ),
+            )
+            print(
+                "svd model encoder q - loraA@loraB",
                 recon_error(
                     SVD_model.encoder.layers[i].self_attention.fc_q.weight,
                     w_q_encoder_loraA_weights[i] @ w_q_encoder_loraB_weights[i],
-                )
+                ),
             )
             print(
                 recon_error(
