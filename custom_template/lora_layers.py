@@ -105,7 +105,7 @@ class Linear(nn.Linear, LoRALayer):
         merge_weights: bool = True,
         **kwargs
     ):
-        nn.Linear.__init__(self, in_features, out_features, **kwargs)
+        nn.Linear.__init__(self, in_features, out_features, bias=None,**kwargs)
         LoRALayer.__init__(self, r=r, lora_alpha=lora_alpha, lora_dropout=lora_dropout, merge_weights=merge_weights)
 
         self.fan_in_fan_out = fan_in_fan_out
@@ -150,9 +150,9 @@ class Linear(nn.Linear, LoRALayer):
             return w.transpose(0, 1) if self.fan_in_fan_out else w
 
         if self.r > 0 and not self.merged:
-            Wx = F.linear(x, T(self.weight), None)
-            dWx = (x @ self.lora_A.transpose(0, 1) @ self.lora_B.transpose(0, 1))# * self.scaling
-            return Wx+dWx
+            result = F.linear(x, T(self.weight), None)
+            result += (x @ self.lora_A.transpose(0, 1) @ self.lora_B.transpose(0, 1)) # * self.scaling
+            return result
         else:
             return F.linear(x, T(self.weight), None)
 

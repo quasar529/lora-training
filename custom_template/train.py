@@ -19,6 +19,7 @@ from utils import (
     W_init_by_SVD,
     make_W_zero,
     W_weight_copy,
+    W_init_by_loraAB,
 )
 from torch.optim.lr_scheduler import CosineAnnealingWarmRestarts, CosineAnnealingLR, ReduceLROnPlateau
 import wandb
@@ -126,16 +127,16 @@ def recon_error(original_weight, approx_weight):
 
 
 def main(model_name, EX_type, rank):
-    # wandb.init(
-    #     # set the wandb project where this run will be logged
-    #     project="lora-training",
-    #     # track hyperparameters and run metadata
-    #     config={
-    #         "learning_rate": 0.0005,
-    #         "epochs": 100,
-    #     },
-    # )
-    # wandb.run.name = f"{model_name}"
+    wandb.init(
+        # set the wandb project where this run will be logged
+        project="lora-training",
+        # track hyperparameters and run metadata
+        config={
+            "learning_rate": 0.0005,
+            "epochs": 100,
+        },
+    )
+    wandb.run.name = f"{model_name}"
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     SRC, TRG, train_dataset, valid_dataset, test_dataset = prepare_dataset()
 
@@ -238,14 +239,6 @@ def main(model_name, EX_type, rank):
         W=0 으로 초기화 후 fix 하고,
         dW = A @ B, 즉 LoRA_A = A, LoRA_B = B로 초기화해 LoRA를 학습시킨다.
         """
-        model.load_state_dict(
-            torch.load("/content/drive/MyDrive/LAB/lora-training/custom_template/checkpoints/base_transformer.pt"),
-            strict=False,
-        )
-        insert_lora(model, HIDDEN_DIM, rank)  # LoRA insert
-        make_W_zero(model)  # W=0
-        lora.mark_only_lora_as_trainable(model)  # F freeze
-
         SVD_model = copy.deepcopy(Transformer(enc, dec, SRC_PAD_IDX, TRG_PAD_IDX, device))
         SVD_model.load_state_dict(
             torch.load(
@@ -253,135 +246,192 @@ def main(model_name, EX_type, rank):
             ),
             strict=False,
         )
-        W_init_by_SVD(model, SVD_model, rank)  # dW init by W_lowrank
 
-        print(f"The {model_name} has {count_parameters(model):,} trainable parameters")
-        print("### CHECK LAYERS WEIGHTS ###")
-        print("W (encoder_q)\n", model.encoder.layers[0].self_attention.fc_q.weight.data)
-        print(
-            "encoder_q_LoraA\n",
-            model.encoder.layers[0].self_attention.fc_q.lora_A,
-            "encoder_q_LoraB\n",
-            model.encoder.layers[0].self_attention.fc_q.lora_B,
-        )
-        print(
-            "\n recon error: ",
-            recon_error(
-                SVD_model.encoder.layers[0].self_attention.fc_q.weight.data,
-                model.encoder.layers[0].self_attention.fc_q.lora_A.transpose(0, 1)
-                @ model.encoder.layers[0].self_attention.fc_q.lora_B.transpose(0, 1),
-            ),
-        )
-    elif EX_type == "5_2":
         model.load_state_dict(
             torch.load("/content/drive/MyDrive/LAB/lora-training/custom_template/checkpoints/base_transformer.pt"),
             strict=False,
         )
+        insert_lora(model, HIDDEN_DIM, rank)  # LoRA insert
+        make_W_zero(model)  # W=0
+        W_init_by_SVD(model, SVD_model, rank)  # dW init by W_lowrank
+        lora.mark_only_lora_as_trainable(model)  # F freeze
 
-        with torch.no_grad():
-            for i in range(3):
-                encoder_q_original_weight = model.encoder.layers[i].self_attention.fc_q.weight.data
-                encoder_v_original_weight = model.encoder.layers[i].self_attention.fc_v.weight.data
-
-                decoder_q_original_weight = model.decoder.layers[i].self_attention.fc_q.weight.data
-                decoder_v_original_weight = model.decoder.layers[i].self_attention.fc_v.weight.data
-
-                encoder_q_u, encoder_q_s, encoder_q_v = torch.linalg.svd(encoder_q_original_weight)
-                encoder_v_u, encoder_v_s, encoder_v_v = torch.linalg.svd(encoder_v_original_weight)
-
-                decoder_q_u, decoder_q_s, decoder_q_v = torch.linalg.svd(decoder_q_original_weight)
-                decoder_v_u, decoder_v_s, decoder_v_v = torch.linalg.svd(decoder_v_original_weight)
-        make_W_zero(model)
-        with torch.no_grad():
-            for i in range(3):
-                approx_rank = 32
-                # W = low rank W
-                model.encoder.layers[i].self_attention.fc_q.weight.copy_(
-                    (encoder_q_u[:, :approx_rank] @ torch.diag(encoder_q_s[:approx_rank]).sqrt())
-                    @ (torch.diag(encoder_q_s[:approx_rank]).sqrt() @ encoder_q_v[:approx_rank, :])
-                )  # = encoder_q_u @ torch.diag(encoder_q_s) @ encoder_q_v
-                model.encoder.layers[i].self_attention.fc_v.weight.copy_(
-                    (encoder_v_u[:, :approx_rank] @ torch.diag(encoder_v_s[:approx_rank]).sqrt())
-                    @ (torch.diag(encoder_v_s[:approx_rank]).sqrt() @ encoder_v_v[:approx_rank, :])
-                )  # .data = encoder_v_u @ torch.diag(encoder_v_s) @ encoder_v_v
-                model.decoder.layers[i].self_attention.fc_q.weight.copy_(
-                    (decoder_q_u[:, :approx_rank] @ torch.diag(decoder_q_s[:approx_rank]).sqrt())
-                    @ (torch.diag(decoder_q_s[:approx_rank]).sqrt() @ decoder_q_v[:approx_rank, :])
-                )
-                model.decoder.layers[i].self_attention.fc_v.weight.copy_(
-                    (decoder_v_u[:, :approx_rank] @ torch.diag(decoder_v_s[:approx_rank]).sqrt())
-                    @ (torch.diag(decoder_v_s[:approx_rank]).sqrt() @ decoder_v_v[:approx_rank, :])
-                )
-
-        insert_lora(model, HIDDEN_DIM, 32)
-        lora.mark_only_lora_as_trainable(model)
-
-        print("### CHECK LAYERS WEIGHTS ###")
-        print("W (encoder_q)\n", model.encoder.layers[0].self_attention.fc_q.weight.data)
+        print(f"The {model_name} has {count_parameters(model):,} trainable parameters")
+        # print("### CHECK LAYERS WEIGHTS ###")
+        # print("W (encoder_q)\n", model.encoder.layers[0].self_attention.fc_q.weight.data)
+        # print(
+        #     "encoder_q_LoraA\n",
+        #     model.encoder.layers[0].self_attention.fc_q.lora_A,
+        #     "encoder_q_LoraB\n",
+        #     model.encoder.layers[0].self_attention.fc_q.lora_B,
+        # )
         print(
-            "encoder_q_LoraA\n",
-            model.encoder.layers[0].self_attention.fc_q.lora_A,
-            "encoder_q_LoraB\n",
-            model.encoder.layers[0].self_attention.fc_q.lora_B,
+            "\n recon error: ",
+            recon_error(
+                SVD_model.encoder.layers[0].self_attention.fc_q.weight.data.T,
+                model.encoder.layers[0].self_attention.fc_q.lora_A.transpose(0, 1)
+                @ model.encoder.layers[0].self_attention.fc_q.lora_B.transpose(0, 1),
+            ),
+        )
+    elif EX_type == "5_1":
+        pass
+    elif EX_type == "5_2_1":
+        SVD_model = copy.deepcopy(Transformer(enc, dec, SRC_PAD_IDX, TRG_PAD_IDX, device))
+        SVD_model.load_state_dict(
+            torch.load(
+                "/content/drive/MyDrive/LAB/lora-training/custom_template/checkpoints/base_transformer_copy.pt"
+            ),
+            strict=False,
+        )
+
+        model.load_state_dict(
+            torch.load("/content/drive/MyDrive/LAB/lora-training/custom_template/checkpoints/base_transformer.pt"),
+            strict=False,
+        )
+        insert_lora(model, HIDDEN_DIM, rank)  # LoRA insert
+        make_W_zero(model)  # W=0
+        W_init_by_SVD(model, SVD_model, rank)  # dW init by W_lowrank
+        lora.mark_only_lora_as_trainable(model)  # F freeze
+        print(f"The {model_name} has {count_parameters(model):,} trainable parameters")
+        print(
+            "\n recon error: ",
+            recon_error(
+                SVD_model.encoder.layers[0].self_attention.fc_q.weight.data.T,
+                model.encoder.layers[0].self_attention.fc_q.lora_A.transpose(0, 1)
+                @ model.encoder.layers[0].self_attention.fc_q.lora_B.transpose(0, 1),
+            ),
+        )
+        # with torch.no_grad():
+        #     for i in range(3):
+        #         encoder_q_original_weight = model.encoder.layers[i].self_attention.fc_q.weight.data
+        #         encoder_v_original_weight = model.encoder.layers[i].self_attention.fc_v.weight.data
+
+        #         decoder_q_original_weight = model.decoder.layers[i].self_attention.fc_q.weight.data
+        #         decoder_v_original_weight = model.decoder.layers[i].self_attention.fc_v.weight.data
+
+        #         encoder_q_u, encoder_q_s, encoder_q_v = torch.linalg.svd(encoder_q_original_weight)
+        #         encoder_v_u, encoder_v_s, encoder_v_v = torch.linalg.svd(encoder_v_original_weight)
+
+        #         decoder_q_u, decoder_q_s, decoder_q_v = torch.linalg.svd(decoder_q_original_weight)
+        #         decoder_v_u, decoder_v_s, decoder_v_v = torch.linalg.svd(decoder_v_original_weight)
+        # make_W_zero(model)
+        # with torch.no_grad():
+        #     for i in range(3):
+        #         approx_rank = 32
+        #         # W = low rank W
+        #         model.encoder.layers[i].self_attention.fc_q.weight.copy_(
+        #             (encoder_q_u[:, :approx_rank] @ torch.diag(encoder_q_s[:approx_rank]).sqrt())
+        #             @ (torch.diag(encoder_q_s[:approx_rank]).sqrt() @ encoder_q_v[:approx_rank, :])
+        #         )  # = encoder_q_u @ torch.diag(encoder_q_s) @ encoder_q_v
+        #         model.encoder.layers[i].self_attention.fc_v.weight.copy_(
+        #             (encoder_v_u[:, :approx_rank] @ torch.diag(encoder_v_s[:approx_rank]).sqrt())
+        #             @ (torch.diag(encoder_v_s[:approx_rank]).sqrt() @ encoder_v_v[:approx_rank, :])
+        #         )  # .data = encoder_v_u @ torch.diag(encoder_v_s) @ encoder_v_v
+        #         model.decoder.layers[i].self_attention.fc_q.weight.copy_(
+        #             (decoder_q_u[:, :approx_rank] @ torch.diag(decoder_q_s[:approx_rank]).sqrt())
+        #             @ (torch.diag(decoder_q_s[:approx_rank]).sqrt() @ decoder_q_v[:approx_rank, :])
+        #         )
+        #         model.decoder.layers[i].self_attention.fc_v.weight.copy_(
+        #             (decoder_v_u[:, :approx_rank] @ torch.diag(decoder_v_s[:approx_rank]).sqrt())
+        #             @ (torch.diag(decoder_v_s[:approx_rank]).sqrt() @ decoder_v_v[:approx_rank, :])
+        #         )
+
+        # insert_lora(model, HIDDEN_DIM, 32)
+        # lora.mark_only_lora_as_trainable(model)
+
+        # print("### CHECK LAYERS WEIGHTS ###")
+        # print("W (encoder_q)\n", model.encoder.layers[0].self_attention.fc_q.weight.data)
+        # print(
+        #     "encoder_q_LoraA\n",
+        #     model.encoder.layers[0].self_attention.fc_q.lora_A,
+        #     "encoder_q_LoraB\n",
+        #     model.encoder.layers[0].self_attention.fc_q.lora_B,
+        # )
+    elif EX_type == "5_2_2":
+        ex5_2_1_model = copy.deepcopy(Transformer(enc, dec, SRC_PAD_IDX, TRG_PAD_IDX, device))
+        insert_lora(ex5_2_1_model, HIDDEN_DIM, rank)  # LoRA insert
+        ex5_2_1_model.load_state_dict(
+            torch.load(
+                "/content/drive/MyDrive/LAB/lora-training/custom_template/checkpoints/EX5_2_1_W=0_dW=A32B32.pt"
+            ),
+            strict=False,
+        )
+
+        model.load_state_dict(
+            torch.load("/content/drive/MyDrive/LAB/lora-training/custom_template/checkpoints/base_transformer.pt"),
+            strict=False,
+        )
+        insert_lora(model, HIDDEN_DIM, rank)  # LoRA insert
+        W_init_by_loraAB(model, ex5_2_1_model)
+        lora.mark_only_lora_as_trainable(model)  # F freeze
+
+        print(f"The {model_name} has {count_parameters(model):,} trainable parameters")
+        print(
+            "\n recon error: ",
+            recon_error(
+                model.encoder.layers[0].self_attention.fc_q.weight.data.T,
+                ex5_2_1_model.encoder.layers[0].self_attention.fc_q.lora_A.transpose(0, 1)
+                @ ex5_2_1_model.encoder.layers[0].self_attention.fc_q.lora_B.transpose(0, 1),
+            ),
         )
 
     model.to(device)
     optimizer = torch.optim.Adam(model.parameters(), lr=LEARNING_RATE)
-
-    # 뒷 부분의 패딩(padding)에 대해서는 값 무시
-    criterion = nn.CrossEntropyLoss(ignore_index=TRG_PAD_IDX)
     scheduler = CosineAnnealingWarmRestarts(optimizer, T_0=25, T_mult=2, eta_min=0.00001)
-
+    # 뒷 부분의 패딩(padding)에 대해서는 값 무시
     criterion = nn.CrossEntropyLoss(ignore_index=TRG_PAD_IDX)
     test_loss = evaluate(model, test_iterator, criterion)
     print("### CHECK THE CONTINUITY ###")
     print(f"Test Loss: {test_loss:.3f} | Test PPL: {math.exp(test_loss):.3f}")
-    # wandb.log({"Test Loss": test_loss, "Test PPL": math.exp(test_loss)})
-    # best_valid_loss = float("inf")
-    # not_improved_count = 0
+    wandb.log({"Test Loss": test_loss, "Test PPL": math.exp(test_loss)})
 
-    # for epoch in range(N_EPOCHS):
-    #     start_time = time.time()  # 시작 시간 기록
+    best_valid_loss = float("inf")
+    not_improved_count = 0
+    criterion = nn.CrossEntropyLoss(ignore_index=TRG_PAD_IDX)
 
-    #     train_loss = train(model, train_iterator, optimizer, criterion, CLIP)
-    #     valid_loss = evaluate(model, valid_iterator, criterion)
-    #     scheduler.step()
-    #     end_time = time.time()  # 종료 시간 기록
-    #     epoch_mins, epoch_secs = epoch_time(start_time, end_time)
+    for epoch in range(N_EPOCHS):
+        start_time = time.time()  # 시작 시간 기록
 
-    #     if valid_loss < best_valid_loss:
-    #         best_valid_loss = valid_loss
-    #         torch.save(
-    #             model.state_dict(),
-    #             f"/content/drive/MyDrive/LAB/lora-training/custom_template/checkpoints/{model_name}_best_at{epoch}.pt",
-    #         )
-    #         not_improved_count = 0
-    #     else:
-    #         not_improved_count += 1
+        train_loss = train(model, train_iterator, optimizer, criterion, CLIP)
+        valid_loss = evaluate(model, valid_iterator, criterion)
+        scheduler.step()
+        end_time = time.time()  # 종료 시간 기록
+        epoch_mins, epoch_secs = epoch_time(start_time, end_time)
 
-    #     print(f"Epoch: {epoch + 1:02} | Time: {epoch_mins}m {epoch_secs}s")
-    #     print(f"\tTrain Loss: {train_loss:.3f} | Train PPL: {math.exp(train_loss):.3f}")
-    #     print(f"\tValidation Loss: {valid_loss:.3f} | Validation PPL: {math.exp(valid_loss):.3f}")
-    #     wandb.log(
-    #         {
-    #             "Time": epoch_mins * 60 + epoch_secs,
-    #             "Train loss": train_loss,
-    #             "Train PPL": math.exp(train_loss),
-    #             "Valid Loss": valid_loss,
-    #             "Valid PPL": math.exp(valid_loss),
-    #             "LR": scheduler.optimizer.param_groups[0]["lr"],  # scheduler.get_last_lr()[0]
-    #         }
-    #     )
+        if valid_loss < best_valid_loss:
+            best_valid_loss = valid_loss
+            torch.save(
+                model.state_dict(),
+                f"/content/drive/MyDrive/LAB/lora-training/custom_template/checkpoints/{model_name}.pt",
+            )
+            wandb.log({"Best Epoch": epoch + 1})
+            not_improved_count = 0
+        else:
+            not_improved_count += 1
 
-    #     if not_improved_count == 5:
-    #         print(f"Validation performance didn't improve for {not_improved_count} epochs at {epoch} epoch.")
-    #         break
+        print(f"Epoch: {epoch + 1:02} | Time: {epoch_mins}m {epoch_secs}s")
+        print(f"\tTrain Loss: {train_loss:.3f} | Train PPL: {math.exp(train_loss):.3f}")
+        print(f"\tValidation Loss: {valid_loss:.3f} | Validation PPL: {math.exp(valid_loss):.3f}")
+        wandb.log(
+            {
+                "Time": epoch_mins * 60 + epoch_secs,
+                "Train loss": train_loss,
+                "Train PPL": math.exp(train_loss),
+                "Valid Loss": valid_loss,
+                "Valid PPL": math.exp(valid_loss),
+                "LR": scheduler.optimizer.param_groups[0]["lr"],  # scheduler.get_last_lr()[0]
+            }
+        )
+
+        if not_improved_count == 5:
+            print(f"Validation performance didn't improve for {not_improved_count} epochs at {epoch+1} epoch.")
+            break
 
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Lora Training")
-    parser.add_argument("-m", "--model", default="EX5_LoRA_initbySVD", type=str, help="Model Name")
-    parser.add_argument("-e", "--EX_type", default="5", type=str, help="Type of Experiment")
-    parser.add_argument("-r", "--rank", default=64, type=int, help="Rank of LoRA")
+    parser.add_argument("-m", "--model", default="EX5_2_2_W=A32B32_dW=0", type=str, help="Model Name")
+    parser.add_argument("-e", "--EX_type", default="5_2_2", type=str, help="Type of Experiment")
+    parser.add_argument("-r", "--rank", default=32, type=int, help="Rank of LoRA")
     args = parser.parse_args()
     main(args.model, args.EX_type, args.rank)

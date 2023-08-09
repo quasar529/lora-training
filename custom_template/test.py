@@ -18,6 +18,7 @@ from utils import (
     W_init_by_SVD,
     make_W_zero,
     W_weight_copy,
+    recon_error,
 )
 from torch.optim.lr_scheduler import CosineAnnealingWarmRestarts, CosineAnnealingLR, ReduceLROnPlateau
 import wandb
@@ -89,9 +90,84 @@ def main():
     enc = copy.deepcopy(Encoder(INPUT_DIM, HIDDEN_DIM, ENC_LAYERS, ENC_HEADS, ENC_PF_DIM, ENC_DROPOUT, device))
     dec = copy.deepcopy(Decoder(OUTPUT_DIM, HIDDEN_DIM, DEC_LAYERS, DEC_HEADS, DEC_PF_DIM, DEC_DROPOUT, device))
 
+    # rank_list = [32, 64, 128, 256]
+    # s_of_svd = []
+    # for rank in rank_list:
+    #     print(f"{rank} Rank Model ")
+    #     model = copy.deepcopy(Transformer(enc, dec, SRC_PAD_IDX, TRG_PAD_IDX, device).to(device))
+    #     w_model = copy.deepcopy(Transformer(enc, dec, SRC_PAD_IDX, TRG_PAD_IDX, device).to(device))
+    #     model.load_state_dict(
+    #         torch.load("/content/drive/MyDrive/LAB/lora-training/custom_template/checkpoints/base_transformer.pt"),
+    #         strict=False,
+    #     )
+    #     w_model.load_state_dict(
+    #         torch.load(
+    #             "/content/drive/MyDrive/LAB/lora-training/custom_template/checkpoints/base_transformer_copy.pt"
+    #         ),
+    #         strict=False,
+    #     )
+    #     insert_lora(model, HIDDEN_DIM, rank)
+    #     make_W_zero(model)
+
+    #     with torch.no_grad():
+    #         for i in range(3):
+    #             encoder_q_original_weight = w_model.encoder.layers[i].self_attention.fc_q.weight.data
+    #             encoder_v_original_weight = w_model.encoder.layers[i].self_attention.fc_v.weight.data
+
+    #             decoder_q_original_weight = w_model.decoder.layers[i].self_attention.fc_q.weight.data
+    #             decoder_v_original_weight = w_model.decoder.layers[i].self_attention.fc_v.weight.data
+
+    #             encoder_q_u, encoder_q_s, encoder_q_v = torch.linalg.svd(encoder_q_original_weight.T)
+    #             encoder_v_u, encoder_v_s, encoder_v_v = torch.linalg.svd(encoder_v_original_weight.T)
+
+    #             decoder_q_u, decoder_q_s, decoder_q_v = torch.linalg.svd(decoder_q_original_weight.T)
+    #             decoder_v_u, decoder_v_s, decoder_v_v = torch.linalg.svd(decoder_v_original_weight.T)
+
+    #             approx_rank = rank
+
+    #             model.encoder.layers[i].self_attention.fc_q.lora_A.copy_(
+    #                 (encoder_q_u[:, :approx_rank] @ torch.diag(encoder_q_s[:approx_rank]).sqrt()).T
+    #             )
+    #             model.encoder.layers[i].self_attention.fc_q.lora_B.copy_(
+    #                 (torch.diag(encoder_q_s[:approx_rank]).sqrt() @ encoder_q_v[:approx_rank, :]).T
+    #             )
+    #             model.encoder.layers[i].self_attention.fc_v.lora_A.copy_(
+    #                 (encoder_v_u[:, :approx_rank] @ torch.diag(encoder_v_s[:approx_rank]).sqrt()).T
+    #             )
+    #             model.encoder.layers[i].self_attention.fc_v.lora_B.copy_(
+    #                 (torch.diag(encoder_v_s[:approx_rank]).sqrt() @ encoder_v_v[:approx_rank, :]).T
+    #             )
+
+    #             model.decoder.layers[i].self_attention.fc_q.lora_A.copy_(
+    #                 (decoder_q_u[:, :approx_rank] @ torch.diag(decoder_q_s[:approx_rank]).sqrt()).T
+    #             )
+    #             model.decoder.layers[i].self_attention.fc_q.lora_B.copy_(
+    #                 (torch.diag(decoder_q_s[:approx_rank]).sqrt() @ decoder_q_v[:approx_rank, :]).T
+    #             )
+
+    #             model.decoder.layers[i].self_attention.fc_v.lora_A.copy_(
+    #                 (decoder_v_u[:, :approx_rank] @ torch.diag(decoder_v_s[:approx_rank]).sqrt()).T
+    #             )
+    #             model.decoder.layers[i].self_attention.fc_v.lora_B.copy_(
+    #                 (torch.diag(decoder_v_s[:approx_rank]).sqrt() @ decoder_v_v[:approx_rank, :]).T
+    #             )
+    #             print("Original Weight Norm: ", torch.linalg.norm(encoder_q_original_weight.T))
+    #             print(
+    #                 "Reconstruction Error : Original Encoder FC_Q - FC_Q.loraA.T @ FC_Q.loraB.T",
+    #                 recon_error(
+    #                     encoder_q_original_weight.T,
+    #                     model.encoder.layers[i].self_attention.fc_q.lora_A.T
+    #                     @ model.encoder.layers[i].self_attention.fc_q.lora_B.T,
+    #                 ),
+    #             )
+    #     criterion = nn.CrossEntropyLoss(ignore_index=TRG_PAD_IDX)
+    #     model.to(device)
+    #     test_loss = evaluate(model, test_iterator, criterion)
+
+    #     print(f"Test Loss: {test_loss:.3f} | Test PPL: {math.exp(test_loss):.3f}\n")
+
+    ### 여기부터
     model = copy.deepcopy(Transformer(enc, dec, SRC_PAD_IDX, TRG_PAD_IDX, device).to(device))
-    w_model = copy.deepcopy(model)
-    w_model = copy.deepcopy(model)
     w_model = copy.deepcopy(Transformer(enc, dec, SRC_PAD_IDX, TRG_PAD_IDX, device).to(device))
     model.load_state_dict(
         torch.load("/content/drive/MyDrive/LAB/lora-training/custom_template/checkpoints/base_transformer.pt"),
@@ -101,21 +177,14 @@ def main():
         torch.load("/content/drive/MyDrive/LAB/lora-training/custom_template/checkpoints/base_transformer_copy.pt"),
         strict=False,
     )
-    criterion = nn.CrossEntropyLoss(ignore_index=TRG_PAD_IDX)
-    model.to(device)
-    test_loss = evaluate(model, test_iterator, criterion)
-    print("Base Transformer")
-    print(f"Test Loss: {test_loss:.3f} | Test PPL: {math.exp(test_loss):.3f}")
 
-    rank = 4
+    rank = 64
     insert_lora(model, HIDDEN_DIM, rank)
 
     make_W_zero(model)
-
+    # print(model.encoder.layers[0].self_attention.fc_q.weight.data)
     W_init_by_SVD(model, w_model, rank)
 
-    # make_W_zero(model)
-    # W svd
     # with torch.no_grad():
     #     for i in range(3):
     #         encoder_q_original_weight = w_model.encoder.layers[i].self_attention.fc_q.weight.data
@@ -124,18 +193,50 @@ def main():
     #         decoder_q_original_weight = w_model.decoder.layers[i].self_attention.fc_q.weight.data
     #         decoder_v_original_weight = w_model.decoder.layers[i].self_attention.fc_v.weight.data
 
-    #         encoder_q_u, encoder_q_s, encoder_q_v = torch.linalg.svd(encoder_q_original_weight)
-    #         encoder_v_u, encoder_v_s, encoder_v_v = torch.linalg.svd(encoder_v_original_weight)
+    #         encoder_q_u, encoder_q_s, encoder_q_v = torch.linalg.svd(encoder_q_original_weight.T)
+    #         encoder_v_u, encoder_v_s, encoder_v_v = torch.linalg.svd(encoder_v_original_weight.T)
 
-    #         decoder_q_u, decoder_q_s, decoder_q_v = torch.linalg.svd(decoder_q_original_weight)
-    #         decoder_v_u, decoder_v_s, decoder_v_v = torch.linalg.svd(decoder_v_original_weight)
+    #         decoder_q_u, decoder_q_s, decoder_q_v = torch.linalg.svd(decoder_q_original_weight.T)
+    #         decoder_v_u, decoder_v_s, decoder_v_v = torch.linalg.svd(decoder_v_original_weight.T)
 
-    # approx_rank = 64
+    #         approx_rank = rank
 
-    # # model.encoder.layers[i].self_attention.fc_q.weight.copy_(encoder_q_u @ torch.diag(encoder_q_s).sqrt()) @ encoder_q_v) #= encoder_q_u @ torch.diag(encoder_q_s) @ encoder_q_v
-    # # model.encoder.layers[i].self_attention.fc_v.weight.copy_(encoder_v_u @ torch.diag(encoder_v_s) @ encoder_v_v)#.data = encoder_v_u @ torch.diag(encoder_v_s) @ encoder_v_v
-    # # model.decoder.layers[i].self_attention.fc_q.weight.copy_(decoder_q_u @ torch.diag(decoder_q_s) @ decoder_q_v)#.data = decoder_q_u @ torch.diag(decoder_q_s) @ decoder_q_v
-    # # model.decoder.layers[i].self_attention.fc_v.weight.copy_(decoder_v_u @ torch.diag(decoder_v_s) @ decoder_v_v)#.data = decoder_v_u @ torch.diag(decoder_v_s) @ decoder_v_v
+    #         model.encoder.layers[i].self_attention.fc_q.lora_A.copy_(
+    #             (encoder_q_u[:, :approx_rank] @ torch.diag(encoder_q_s[:approx_rank]).sqrt()).T
+    #         )
+    #         model.encoder.layers[i].self_attention.fc_q.lora_B.copy_(
+    #             (torch.diag(encoder_q_s[:approx_rank]).sqrt() @ encoder_q_v[:approx_rank, :]).T
+    #         )
+    #         model.encoder.layers[i].self_attention.fc_v.lora_A.copy_(
+    #             (encoder_v_u[:, :approx_rank] @ torch.diag(encoder_v_s[:approx_rank]).sqrt()).T
+    #         )
+    #         model.encoder.layers[i].self_attention.fc_v.lora_B.copy_(
+    #             (torch.diag(encoder_v_s[:approx_rank]).sqrt() @ encoder_v_v[:approx_rank, :]).T
+    #         )
+
+    #         model.decoder.layers[i].self_attention.fc_q.lora_A.copy_(
+    #             (decoder_q_u[:, :approx_rank] @ torch.diag(decoder_q_s[:approx_rank]).sqrt()).T
+    #         )
+    #         model.decoder.layers[i].self_attention.fc_q.lora_B.copy_(
+    #             (torch.diag(decoder_q_s[:approx_rank]).sqrt() @ decoder_q_v[:approx_rank, :]).T
+    #         )
+
+    #         model.decoder.layers[i].self_attention.fc_v.lora_A.copy_(
+    #             (decoder_v_u[:, :approx_rank] @ torch.diag(decoder_v_s[:approx_rank]).sqrt()).T
+    #         )
+    #         model.decoder.layers[i].self_attention.fc_v.lora_B.copy_(
+    #             (torch.diag(decoder_v_s[:approx_rank]).sqrt() @ decoder_v_v[:approx_rank, :]).T
+    #         )
+
+    #         print(
+    #             recon_error(
+    #                 encoder_q_original_weight,
+    #                 model.encoder.layers[i].self_attention.fc_q.lora_A.T
+    #                 @ model.encoder.layers[i].self_attention.fc_q.lora_B.T,
+    #             )
+    #         )
+
+    ### 여기까지
 
     # model.encoder.layers[i].self_attention.fc_q.weight.copy_((encoder_q_u[:, :approx_rank] @ torch.diag(encoder_q_s[:approx_rank]).sqrt())@(torch.diag(encoder_q_s[:approx_rank]).sqrt() @ encoder_q_v[:approx_rank, :])) #= encoder_q_u @ torch.diag(encoder_q_s) @ encoder_q_v
     # model.encoder.layers[i].self_attention.fc_v.weight.copy_((encoder_v_u[:, :approx_rank] @ torch.diag(encoder_v_s[:approx_rank]).sqrt())@(torch.diag(encoder_v_s[:approx_rank]).sqrt() @ encoder_v_v[:approx_rank, :]))#.data = encoder_v_u @ torch.diag(encoder_v_s) @ encoder_v_v
