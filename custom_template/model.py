@@ -13,9 +13,9 @@ class MultiHeadAttentionLayer(nn.Module):
         self.n_heads = n_heads  # 헤드(head)의 개수: 서로 다른 어텐션(attention) 컨셉의 수
         self.head_dim = hidden_dim // n_heads  # 각 헤드(head)에서의 임베딩 차원
 
-        self.fc_q = nn.Linear(hidden_dim, hidden_dim)  # Query 값에 적용될 FC 레이어
-        self.fc_k = nn.Linear(hidden_dim, hidden_dim)  # Key 값에 적용될 FC 레이어
-        self.fc_v = nn.Linear(hidden_dim, hidden_dim)  # Value 값에 적용될 FC 레이어
+        self.fc_q = nn.Linear(hidden_dim, hidden_dim, bias=None)  # Query 값에 적용될 FC 레이어
+        self.fc_k = nn.Linear(hidden_dim, hidden_dim, bias=None)  # Key 값에 적용될 FC 레이어
+        self.fc_v = nn.Linear(hidden_dim, hidden_dim, bias=None)  # Value 값에 적용될 FC 레이어
 
         ### LoRA Linear from loralib
         # self.fc_q= lora.Linear(hidden_dim, hidden_dim, r=64, merge_weights =False )

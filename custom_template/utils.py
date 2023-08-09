@@ -24,17 +24,17 @@ def insert_lora(model, dim, rank, lora_alpha=1):
     len_of_layers = len(model.encoder.layers)
     for i in range(len_of_layers):
         model.encoder.layers[i].self_attention.fc_q = copy.deepcopy(
-            lora_linear(dim, dim, r=rank, lora_alpha=lora_alpha, merge_weights=True)
+            lora_linear(dim, dim, r=rank, lora_alpha=lora_alpha, merge_weights=False)
         )
         model.encoder.layers[i].self_attention.fc_v = copy.deepcopy(
-            lora_linear(dim, dim, r=rank, lora_alpha=lora_alpha, merge_weights=True)
+            lora_linear(dim, dim, r=rank, lora_alpha=lora_alpha, merge_weights=False)
         )
 
         model.decoder.layers[i].self_attention.fc_q = copy.deepcopy(
-            lora_linear(dim, dim, r=rank, lora_alpha=lora_alpha, merge_weights=True)
+            lora_linear(dim, dim, r=rank, lora_alpha=lora_alpha, merge_weights=False)
         )
         model.decoder.layers[i].self_attention.fc_v = copy.deepcopy(
-            lora_linear(dim, dim, r=rank, lora_alpha=lora_alpha, merge_weights=True)
+            lora_linear(dim, dim, r=rank, lora_alpha=lora_alpha, merge_weights=False)
         )
 
 

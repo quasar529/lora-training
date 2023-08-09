@@ -72,12 +72,12 @@ def main():
     # DEC_LAYERS = 1
     # ENC_HEADS = 1
     # DEC_HEADS = 1
-    # ENC_PF_DIM = 8
-    # DEC_PF_DIM = 8
+    # ENC_PF_DIM = 1
+    # DEC_PF_DIM = 1
     # ENC_DROPOUT = 0  # 0.1
     # DEC_DROPOUT = 0  # 0.1
-    # BATCH_SIZE = 4
-    # LEARNING_RATE = 0.0005
+    # BATCH_SIZE = 2
+    # LEARNING_RATE = 0.005
     # N_EPOCHS = 100
     # CLIP = 1
 
@@ -88,7 +88,10 @@ def main():
     )
     enc = copy.deepcopy(Encoder(INPUT_DIM, HIDDEN_DIM, ENC_LAYERS, ENC_HEADS, ENC_PF_DIM, ENC_DROPOUT, device))
     dec = copy.deepcopy(Decoder(OUTPUT_DIM, HIDDEN_DIM, DEC_LAYERS, DEC_HEADS, DEC_PF_DIM, DEC_DROPOUT, device))
+
     model = copy.deepcopy(Transformer(enc, dec, SRC_PAD_IDX, TRG_PAD_IDX, device).to(device))
+    w_model = copy.deepcopy(model)
+    w_model = copy.deepcopy(model)
     w_model = copy.deepcopy(Transformer(enc, dec, SRC_PAD_IDX, TRG_PAD_IDX, device).to(device))
     model.load_state_dict(
         torch.load("/content/drive/MyDrive/LAB/lora-training/custom_template/checkpoints/base_transformer.pt"),
@@ -98,17 +101,18 @@ def main():
         torch.load("/content/drive/MyDrive/LAB/lora-training/custom_template/checkpoints/base_transformer_copy.pt"),
         strict=False,
     )
-    w_criterion = nn.CrossEntropyLoss(ignore_index=TRG_PAD_IDX)
-    w_model.to(device)
-    w_test_loss = evaluate(w_model, test_iterator, w_criterion)
+    criterion = nn.CrossEntropyLoss(ignore_index=TRG_PAD_IDX)
+    model.to(device)
+    test_loss = evaluate(model, test_iterator, criterion)
     print("Base Transformer")
-    print(f"Test Loss: {w_test_loss:.3f} | Test PPL: {math.exp(w_test_loss):.3f}")
+    print(f"Test Loss: {test_loss:.3f} | Test PPL: {math.exp(test_loss):.3f}")
 
-    rank = 64
+    rank = 4
     insert_lora(model, HIDDEN_DIM, rank)
+
     make_W_zero(model)
 
-    # W_init_by_SVD(model, w_model, rank)
+    W_init_by_SVD(model, w_model, rank)
 
     # make_W_zero(model)
     # W svd
@@ -167,99 +171,110 @@ def main():
     #             @ (torch.diag(decoder_v_s[:approx_rank]).sqrt() @ decoder_v_v[:approx_rank, :])
     #         )
     # W svd
-    with torch.no_grad():
-        for i in range(ENC_LAYERS):
-            encoder_q_original_weight = w_model.encoder.layers[i].self_attention.fc_q.weight.data
-            encoder_v_original_weight = w_model.encoder.layers[i].self_attention.fc_v.weight.data
+    # with torch.no_grad():
+    #     for i in range(ENC_LAYERS):
+    #         encoder_q_original_weight = w_model.encoder.layers[i].self_attention.fc_q.weight.data
+    #         encoder_v_original_weight = w_model.encoder.layers[i].self_attention.fc_v.weight.data
 
-            decoder_q_original_weight = w_model.decoder.layers[i].self_attention.fc_q.weight.data
-            decoder_v_original_weight = w_model.decoder.layers[i].self_attention.fc_v.weight.data
+    #         decoder_q_original_weight = w_model.decoder.layers[i].self_attention.fc_q.weight.data
+    #         decoder_v_original_weight = w_model.decoder.layers[i].self_attention.fc_v.weight.data
 
-            encoder_q_u, encoder_q_s, encoder_q_v = torch.linalg.svd(encoder_q_original_weight)
-            encoder_v_u, encoder_v_s, encoder_v_v = torch.linalg.svd(encoder_v_original_weight)
+    #         encoder_q_u, encoder_q_s, encoder_q_v = torch.linalg.svd(encoder_q_original_weight)
+    #         encoder_v_u, encoder_v_s, encoder_v_v = torch.linalg.svd(encoder_v_original_weight)
 
-            decoder_q_u, decoder_q_s, decoder_q_v = torch.linalg.svd(decoder_q_original_weight)
-            decoder_v_u, decoder_v_s, decoder_v_v = torch.linalg.svd(decoder_v_original_weight)
+    #         decoder_q_u, decoder_q_s, decoder_q_v = torch.linalg.svd(decoder_q_original_weight)
+    #         decoder_v_u, decoder_v_s, decoder_v_v = torch.linalg.svd(decoder_v_original_weight)
 
-            approx_rank = rank
+    #         approx_rank = rank
 
-            model.encoder.layers[i].self_attention.fc_q.lora_A.copy_(
-                (encoder_q_u[:, :approx_rank] @ torch.diag(encoder_q_s[:approx_rank]).sqrt()).T
-            )
-            model.encoder.layers[i].self_attention.fc_q.lora_B.copy_(
-                (torch.diag(encoder_q_s[:approx_rank]).sqrt() @ encoder_q_v[:approx_rank, :]).T
-            )
-            model.encoder.layers[i].self_attention.fc_v.lora_A.copy_(
-                (encoder_v_u[:, :approx_rank] @ torch.diag(encoder_v_s[:approx_rank]).sqrt()).T
-            )
-            model.encoder.layers[i].self_attention.fc_v.lora_B.copy_(
-                (torch.diag(encoder_v_s[:approx_rank]).sqrt() @ encoder_v_v[:approx_rank, :]).T
-            )
+    #         model.encoder.layers[i].self_attention.fc_q.lora_A.copy_(
+    #             (encoder_q_u[:, :approx_rank] @ torch.diag(encoder_q_s[:approx_rank]).sqrt()).T
+    #         )
+    #         model.encoder.layers[i].self_attention.fc_q.lora_B.copy_(
+    #             (torch.diag(encoder_q_s[:approx_rank]).sqrt() @ encoder_q_v[:approx_rank, :]).T
+    #         )
+    #         model.encoder.layers[i].self_attention.fc_v.lora_A.copy_(
+    #             (encoder_v_u[:, :approx_rank] @ torch.diag(encoder_v_s[:approx_rank]).sqrt()).T
+    #         )
+    #         model.encoder.layers[i].self_attention.fc_v.lora_B.copy_(
+    #             (torch.diag(encoder_v_s[:approx_rank]).sqrt() @ encoder_v_v[:approx_rank, :]).T
+    #         )
 
-            model.decoder.layers[i].self_attention.fc_q.lora_A.copy_(
-                (decoder_q_u[:, :approx_rank] @ torch.diag(decoder_q_s[:approx_rank]).sqrt()).T
-            )
-            model.decoder.layers[i].self_attention.fc_q.lora_B.copy_(
-                (torch.diag(decoder_q_s[:approx_rank]).sqrt() @ decoder_q_v[:approx_rank, :]).T
-            )
-            model.decoder.layers[i].self_attention.fc_v.lora_A.copy_(
-                (decoder_v_u[:, :approx_rank] @ torch.diag(decoder_v_s[:approx_rank]).sqrt()).T
-            )
-            model.decoder.layers[i].self_attention.fc_v.lora_B.copy_(
-                (torch.diag(decoder_v_s[:approx_rank]).sqrt() @ decoder_v_v[:approx_rank, :]).T
-            )
-            # model.encoder.layers[i].self_attention.fc_q.weight.copy_(encoder_q_u @ torch.diag(encoder_q_s).sqrt()) @ encoder_q_v) #= encoder_q_u @ torch.diag(encoder_q_s) @ encoder_q_v
-            # model.encoder.layers[i].self_attention.fc_v.weight.copy_(encoder_v_u @ torch.diag(encoder_v_s) @ encoder_v_v)#.data = encoder_v_u @ torch.diag(encoder_v_s) @ encoder_v_v
-            # model.decoder.layers[i].self_attention.fc_q.weight.copy_(decoder_q_u @ torch.diag(decoder_q_s) @ decoder_q_v)#.data = decoder_q_u @ torch.diag(decoder_q_s) @ decoder_q_v
-            # model.decoder.layers[i].self_attention.fc_v.weight.copy_(decoder_v_u @ torch.diag(decoder_v_s) @ decoder_v_v)#.data = decoder_v_u @ torch.diag(decoder_v_s) @ decoder_v_v
+    #         model.decoder.layers[i].self_attention.fc_q.lora_A.copy_(
+    #             (decoder_q_u[:, :approx_rank] @ torch.diag(decoder_q_s[:approx_rank]).sqrt()).T
+    #         )
+    #         model.decoder.layers[i].self_attention.fc_q.lora_B.copy_(
+    #             (torch.diag(decoder_q_s[:approx_rank]).sqrt() @ decoder_q_v[:approx_rank, :]).T
+    #         )
+    #         model.decoder.layers[i].self_attention.fc_v.lora_A.copy_(
+    #             (decoder_v_u[:, :approx_rank] @ torch.diag(decoder_v_s[:approx_rank]).sqrt()).T
+    #         )
+    #         model.decoder.layers[i].self_attention.fc_v.lora_B.copy_(
+    #             (torch.diag(decoder_v_s[:approx_rank]).sqrt() @ decoder_v_v[:approx_rank, :]).T
+    #         )
+    #         # model.encoder.layers[i].self_attention.fc_q.weight.copy_(encoder_q_u @ torch.diag(encoder_q_s).sqrt()) @ encoder_q_v) #= encoder_q_u @ torch.diag(encoder_q_s) @ encoder_q_v
+    #         # model.encoder.layers[i].self_attention.fc_v.weight.copy_(encoder_v_u @ torch.diag(encoder_v_s) @ encoder_v_v)#.data = encoder_v_u @ torch.diag(encoder_v_s) @ encoder_v_v
+    #         # model.decoder.layers[i].self_attention.fc_q.weight.copy_(decoder_q_u @ torch.diag(decoder_q_s) @ decoder_q_v)#.data = decoder_q_u @ torch.diag(decoder_q_s) @ decoder_q_v
+    #         # model.decoder.layers[i].self_attention.fc_v.weight.copy_(decoder_v_u @ torch.diag(decoder_v_s) @ decoder_v_v)#.data = decoder_v_u @ torch.diag(decoder_v_s) @ decoder_v_v
 
-            w_model.encoder.layers[i].self_attention.fc_q.weight.copy_(
-                encoder_q_u[:, :approx_rank] @ torch.diag(encoder_q_s[:approx_rank]) @ encoder_q_v[:approx_rank, :]
-            )
-            print(
-                "SVD Valid Test: ",
-                recon_error(
-                    w_model.encoder.layers[i].self_attention.fc_q.weight,
-                    model.encoder.layers[i].self_attention.fc_q.lora_A.T
-                    @ model.encoder.layers[i].self_attention.fc_q.lora_B.T,
-                ),
-            )
+    #         w_model.encoder.layers[i].self_attention.fc_q.weight.copy_(
+    #             (encoder_q_u[:, :approx_rank] @ torch.diag(encoder_q_s[:approx_rank]) @ encoder_q_v[:approx_rank, :]).T
+    #         )
+    #         print(
+    #             "SVD Valid Test: ",
+    #             recon_error(
+    #                 w_model.encoder.layers[i].self_attention.fc_q.weight,
+    #                 model.encoder.layers[i].self_attention.fc_q.lora_A.T
+    #                 @ model.encoder.layers[i].self_attention.fc_q.lora_B.T,
+    #             ),
+    #         )
 
-            w_model.encoder.layers[i].self_attention.fc_v.weight.copy_(
-                encoder_v_u[:, :approx_rank] @ (torch.diag(encoder_v_s[:approx_rank]) @ encoder_v_v[:approx_rank, :])
-            )
-            print(
-                "SVD Valid Test: ",
-                recon_error(
-                    w_model.encoder.layers[i].self_attention.fc_v.weight,
-                    model.encoder.layers[i].self_attention.fc_v.lora_A.T
-                    @ model.encoder.layers[i].self_attention.fc_v.lora_B.T,
-                ),
-            )
+    #         w_model.encoder.layers[i].self_attention.fc_v.weight.copy_(
+    #             (
+    #                 encoder_v_u[:, :approx_rank]
+    #                 @ (torch.diag(encoder_v_s[:approx_rank]) @ encoder_v_v[:approx_rank, :])
+    #             ).T
+    #         )
+    #         print(
+    #             "SVD Valid Test: ",
+    #             recon_error(
+    #                 w_model.encoder.layers[i].self_attention.fc_v.weight,
+    #                 model.encoder.layers[i].self_attention.fc_v.lora_A.T
+    #                 @ model.encoder.layers[i].self_attention.fc_v.lora_B.T,
+    #             ),
+    #         )
 
-            w_model.decoder.layers[i].self_attention.fc_q.weight.copy_(
-                decoder_q_u[:, :approx_rank] @ (torch.diag(decoder_q_s[:approx_rank])) @ decoder_q_v[:approx_rank, :]
-            )
-            print(
-                "SVD Valid Test: ",
-                recon_error(
-                    w_model.decoder.layers[i].self_attention.fc_q.weight,
-                    model.decoder.layers[i].self_attention.fc_q.lora_A.T
-                    @ model.decoder.layers[i].self_attention.fc_q.lora_B.T,
-                ),
-            )
+    #         w_model.decoder.layers[i].self_attention.fc_q.weight.copy_(
+    #             (
+    #                 decoder_q_u[:, :approx_rank]
+    #                 @ (torch.diag(decoder_q_s[:approx_rank]))
+    #                 @ decoder_q_v[:approx_rank, :]
+    #             ).T
+    #         )
+    #         print(
+    #             "SVD Valid Test: ",
+    #             recon_error(
+    #                 w_model.decoder.layers[i].self_attention.fc_q.weight,
+    #                 model.decoder.layers[i].self_attention.fc_q.lora_A.T
+    #                 @ model.decoder.layers[i].self_attention.fc_q.lora_B.T,
+    #             ),
+    #         )
 
-            w_model.decoder.layers[i].self_attention.fc_v.weight.copy_(
-                decoder_v_u[:, :approx_rank] @ (torch.diag(decoder_v_s[:approx_rank])) @ decoder_v_v[:approx_rank, :]
-            )
-            print(
-                "SVD Valid Test: ",
-                recon_error(
-                    w_model.decoder.layers[i].self_attention.fc_v.weight,
-                    model.decoder.layers[i].self_attention.fc_v.lora_A.T
-                    @ model.decoder.layers[i].self_attention.fc_v.lora_B.T,
-                ),
-            )
+    #         w_model.decoder.layers[i].self_attention.fc_v.weight.copy_(
+    #             (
+    #                 decoder_v_u[:, :approx_rank]
+    #                 @ (torch.diag(decoder_v_s[:approx_rank]))
+    #                 @ decoder_v_v[:approx_rank, :]
+    #             ).T
+    #         )
+    #         print(
+    #             "SVD Valid Test: ",
+    #             recon_error(
+    #                 w_model.decoder.layers[i].self_attention.fc_v.weight,
+    #                 model.decoder.layers[i].self_attention.fc_v.lora_A.T
+    #                 @ model.decoder.layers[i].self_attention.fc_v.lora_B.T,
+    #             ),
+    #         )
 
     # with torch.no_grad():
     #     for i in range(1):
@@ -315,19 +330,20 @@ def main():
     #         base_model.decoder.layers[i].self_attention.fc_v.lora_A.copy_(w_v_decoder_loraA_weights[i].transpose(0, 1))
     #         base_model.decoder.layers[i].self_attention.fc_v.lora_B.copy_(w_v_decoder_loraB_weights[i].transpose(0, 1))
     # W_init_by_SVD(model, w_model, 2)
+
+    # w_model.eval()
+    # w_criterion = nn.CrossEntropyLoss(ignore_index=TRG_PAD_IDX)
+    # w_model.to(device)
+    # w_test_loss = evaluate(w_model, test_iterator, w_criterion)
+    # print("w_model")
+    # print(f"Test Loss: {w_test_loss:.3f} | Test PPL: {math.exp(w_test_loss):.3f}")
+
     model.eval()
     criterion = nn.CrossEntropyLoss(ignore_index=TRG_PAD_IDX)
     model.to(device)
     test_loss = evaluate(model, test_iterator, criterion)
     print("model")
     print(f"Test Loss: {test_loss:.3f} | Test PPL: {math.exp(test_loss):.3f}")
-
-    w_model.eval()
-    w_criterion = nn.CrossEntropyLoss(ignore_index=TRG_PAD_IDX)
-    w_model.to(device)
-    w_test_loss = evaluate(w_model, test_iterator, w_criterion)
-    print("w_model")
-    print(f"Test Loss: {w_test_loss:.3f} | Test PPL: {math.exp(w_test_loss):.3f}")
 
 
 if __name__ == "__main__":
