@@ -20,6 +20,7 @@ from utils import (
     make_W_zero,
     W_weight_copy,
     W_init_by_loraAB,
+    W_init_by_WplusAB,
 )
 from torch.optim.lr_scheduler import CosineAnnealingWarmRestarts, CosineAnnealingLR, ReduceLROnPlateau
 import wandb
@@ -152,8 +153,8 @@ def main(model_name, EX_type, rank):
     ENC_DROPOUT = 0.1
     DEC_DROPOUT = 0.1
     BATCH_SIZE = 128
-    LEARNING_RATE = 0.0005
-    N_EPOCHS = 100
+    LEARNING_RATE = 0.005
+    N_EPOCHS = 200
     CLIP = 1
 
     SRC_PAD_IDX = SRC.vocab.stoi[SRC.pad_token]
@@ -257,24 +258,84 @@ def main(model_name, EX_type, rank):
         lora.mark_only_lora_as_trainable(model)  # F freeze
 
         print(f"The {model_name} has {count_parameters(model):,} trainable parameters")
-        # print("### CHECK LAYERS WEIGHTS ###")
-        # print("W (encoder_q)\n", model.encoder.layers[0].self_attention.fc_q.weight.data)
-        # print(
-        #     "encoder_q_LoraA\n",
-        #     model.encoder.layers[0].self_attention.fc_q.lora_A,
-        #     "encoder_q_LoraB\n",
-        #     model.encoder.layers[0].self_attention.fc_q.lora_B,
-        # )
-        print(
-            "\n recon error: ",
-            recon_error(
-                SVD_model.encoder.layers[0].self_attention.fc_q.weight.data.T,
-                model.encoder.layers[0].self_attention.fc_q.lora_A.transpose(0, 1)
-                @ model.encoder.layers[0].self_attention.fc_q.lora_B.transpose(0, 1),
+        reconstruction_error = recon_error(
+            SVD_model.encoder.layers[0].self_attention.fc_q.weight.data.T,
+            model.encoder.layers[0].self_attention.fc_q.lora_A.transpose(0, 1)
+            @ model.encoder.layers[0].self_attention.fc_q.lora_B.transpose(0, 1),
+        )
+        print("\n recon error: ", reconstruction_error)
+        wandb.log(
+            {"Trainable Parameters": count_parameters(model), "recon error of Encoder_fc_q": reconstruction_error}
+        )
+    elif EX_type == "5_1_2":
+        ex5_2_1_model = copy.deepcopy(Transformer(enc, dec, SRC_PAD_IDX, TRG_PAD_IDX, device))
+        insert_lora(ex5_2_1_model, HIDDEN_DIM, rank)  # LoRA insert
+        ex5_2_1_model.load_state_dict(
+            torch.load(
+                "/content/drive/MyDrive/LAB/lora-training/custom_template/checkpoints/EX5_2_1_W=0_dW=A32B32_T_0=100.pt"
+            ),
+            strict=False,
+        )
+        ex5_2_1_model_criterion = nn.CrossEntropyLoss(ignore_index=TRG_PAD_IDX)
+        test_loss = evaluate(ex5_2_1_model.to(device), test_iterator, ex5_2_1_model_criterion)
+        print("### CHECK THE CONTINUITY ###")
+        print(f"Test Loss: {test_loss:.3f} | Test PPL: {math.exp(test_loss):.3f}")
+
+        model.load_state_dict(
+            torch.load("/content/drive/MyDrive/LAB/lora-training/custom_template/checkpoints/base_transformer.pt"),
+            strict=False,
+        )
+        insert_lora(model, HIDDEN_DIM, 2)  # LoRA insert
+        make_W_zero(model)  # W=0
+        W_init_by_loraAB(model, ex5_2_1_model)
+        lora.mark_only_lora_as_trainable(model)  # F freeze
+
+        print(f"The {model_name} has {count_parameters(model):,} trainable parameters")
+        reconstruction_error = recon_error(
+            model.encoder.layers[0].self_attention.fc_q.weight.data.T.to(device),
+            ex5_2_1_model.encoder.layers[0].self_attention.fc_q.lora_A.transpose(0, 1)
+            @ ex5_2_1_model.encoder.layers[0].self_attention.fc_q.lora_B.transpose(0, 1),
+        )
+        print("\n recon error: ", reconstruction_error)
+        wandb.log(
+            {"Trainable Parameters": count_parameters(model), "recon error of Encoder_fc_q": reconstruction_error}
+        )
+    elif EX_type == "5_1_2_2":
+        ex5_1_2_model = copy.deepcopy(Transformer(enc, dec, SRC_PAD_IDX, TRG_PAD_IDX, device))
+        insert_lora(ex5_1_2_model, HIDDEN_DIM, 2)  # LoRA insert
+        ex5_1_2_model.load_state_dict(
+            torch.load(
+                "/content/drive/MyDrive/LAB/lora-training/custom_template/checkpoints/EX5_1_2W=A32B32_dW=0_rank2_T_0=100_1st.pt"
+            ),
+            strict=False,
+        )
+        ex5_1_2_model_criterion = nn.CrossEntropyLoss(ignore_index=TRG_PAD_IDX)
+        test_loss = evaluate(ex5_1_2_model.to(device), test_iterator, ex5_1_2_model_criterion)
+        print("### CHECK THE CONTINUITY ###")
+        print(f"Test Loss: {test_loss:.3f} | Test PPL: {math.exp(test_loss):.3f}")
+
+        model.load_state_dict(
+            torch.load("/content/drive/MyDrive/LAB/lora-training/custom_template/checkpoints/base_transformer.pt"),
+            strict=False,
+        )
+        insert_lora(model, HIDDEN_DIM, 2)  # LoRA insert
+        make_W_zero(model)  # W=0
+        W_init_by_WplusAB(model, ex5_1_2_model)
+        lora.mark_only_lora_as_trainable(model)  # F freeze
+
+        reconstruction_error = recon_error(
+            model.encoder.layers[0].self_attention.fc_q.weight.data.T.to(device),
+            ex5_1_2_model.encoder.layers[0].self_attention.fc_q.weight.data.T
+            + (
+                ex5_1_2_model.encoder.layers[0].self_attention.fc_q.lora_A.transpose(0, 1)
+                @ ex5_1_2_model.encoder.layers[0].self_attention.fc_q.lora_B.transpose(0, 1)
             ),
         )
-    elif EX_type == "5_1":
-        pass
+        print(f"The {model_name} has {count_parameters(model):,} trainable parameters")
+        print("\n recon error: ", reconstruction_error)
+        wandb.log(
+            {"Trainable Parameters": count_parameters(model), "recon error of Encoder_fc_q": reconstruction_error}
+        )
     elif EX_type == "5_2_1":
         SVD_model = copy.deepcopy(Transformer(enc, dec, SRC_PAD_IDX, TRG_PAD_IDX, device))
         SVD_model.load_state_dict(
@@ -293,13 +354,14 @@ def main(model_name, EX_type, rank):
         W_init_by_SVD(model, SVD_model, rank)  # dW init by W_lowrank
         lora.mark_only_lora_as_trainable(model)  # F freeze
         print(f"The {model_name} has {count_parameters(model):,} trainable parameters")
-        print(
-            "\n recon error: ",
-            recon_error(
-                SVD_model.encoder.layers[0].self_attention.fc_q.weight.data.T,
-                model.encoder.layers[0].self_attention.fc_q.lora_A.transpose(0, 1)
-                @ model.encoder.layers[0].self_attention.fc_q.lora_B.transpose(0, 1),
-            ),
+        reconstruction_error = recon_error(
+            SVD_model.encoder.layers[0].self_attention.fc_q.weight.data.T,
+            model.encoder.layers[0].self_attention.fc_q.lora_A.transpose(0, 1)
+            @ model.encoder.layers[0].self_attention.fc_q.lora_B.transpose(0, 1),
+        )
+        print("\n recon error of Encoder_fc_q: ", reconstruction_error)
+        wandb.log(
+            {"Trainable Parameters": count_parameters(model), "recon error of Encoder_fc_q": reconstruction_error}
         )
         # with torch.no_grad():
         #     for i in range(3):
@@ -352,10 +414,14 @@ def main(model_name, EX_type, rank):
         insert_lora(ex5_2_1_model, HIDDEN_DIM, rank)  # LoRA insert
         ex5_2_1_model.load_state_dict(
             torch.load(
-                "/content/drive/MyDrive/LAB/lora-training/custom_template/checkpoints/EX5_2_1_W=0_dW=A32B32.pt"
+                "/content/drive/MyDrive/LAB/lora-training/custom_template/checkpoints/EX5_2_1_W=0_dW=A32B32_T_0=100.pt"
             ),
             strict=False,
         )
+        ex5_2_1_model_criterion = nn.CrossEntropyLoss(ignore_index=TRG_PAD_IDX)
+        test_loss = evaluate(ex5_2_1_model.to(device), test_iterator, ex5_2_1_model_criterion)
+        print("### CHECK THE CONTINUITY ###")
+        print(f"Test Loss: {test_loss:.3f} | Test PPL: {math.exp(test_loss):.3f}")
 
         model.load_state_dict(
             torch.load("/content/drive/MyDrive/LAB/lora-training/custom_template/checkpoints/base_transformer.pt"),
@@ -366,18 +432,19 @@ def main(model_name, EX_type, rank):
         lora.mark_only_lora_as_trainable(model)  # F freeze
 
         print(f"The {model_name} has {count_parameters(model):,} trainable parameters")
-        print(
-            "\n recon error: ",
-            recon_error(
-                model.encoder.layers[0].self_attention.fc_q.weight.data.T,
-                ex5_2_1_model.encoder.layers[0].self_attention.fc_q.lora_A.transpose(0, 1)
-                @ ex5_2_1_model.encoder.layers[0].self_attention.fc_q.lora_B.transpose(0, 1),
-            ),
+        reconstruction_error = recon_error(
+            model.encoder.layers[0].self_attention.fc_q.weight.data.T.to(device),
+            ex5_2_1_model.encoder.layers[0].self_attention.fc_q.lora_A.transpose(0, 1)
+            @ ex5_2_1_model.encoder.layers[0].self_attention.fc_q.lora_B.transpose(0, 1),
+        )
+        print("\n recon error: ", reconstruction_error)
+        wandb.log(
+            {"Trainable Parameters": count_parameters(model), "recon error of Encoder_fc_q": reconstruction_error}
         )
 
     model.to(device)
     optimizer = torch.optim.Adam(model.parameters(), lr=LEARNING_RATE)
-    scheduler = CosineAnnealingWarmRestarts(optimizer, T_0=25, T_mult=2, eta_min=0.00001)
+    scheduler = CosineAnnealingWarmRestarts(optimizer, T_0=100, T_mult=2, eta_min=0.00001)
     # 뒷 부분의 패딩(padding)에 대해서는 값 무시
     criterion = nn.CrossEntropyLoss(ignore_index=TRG_PAD_IDX)
     test_loss = evaluate(model, test_iterator, criterion)
@@ -414,7 +481,6 @@ def main(model_name, EX_type, rank):
         print(f"\tValidation Loss: {valid_loss:.3f} | Validation PPL: {math.exp(valid_loss):.3f}")
         wandb.log(
             {
-                "Time": epoch_mins * 60 + epoch_secs,
                 "Train loss": train_loss,
                 "Train PPL": math.exp(train_loss),
                 "Valid Loss": valid_loss,
@@ -423,15 +489,17 @@ def main(model_name, EX_type, rank):
             }
         )
 
-        if not_improved_count == 5:
+        if not_improved_count == 10:
             print(f"Validation performance didn't improve for {not_improved_count} epochs at {epoch+1} epoch.")
             break
 
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Lora Training")
-    parser.add_argument("-m", "--model", default="EX5_2_2_W=A32B32_dW=0", type=str, help="Model Name")
-    parser.add_argument("-e", "--EX_type", default="5_2_2", type=str, help="Type of Experiment")
+    parser.add_argument(
+        "-m", "--model", default="5_1_2_2_W=W+A2B2_dW=0_rank2_T_0=100_2nd_lrx10", type=str, help="Model Name"
+    )
+    parser.add_argument("-e", "--EX_type", default="5_1_2_2", type=str, help="Type of Experiment")
     parser.add_argument("-r", "--rank", default=32, type=int, help="Rank of LoRA")
     args = parser.parse_args()
     main(args.model, args.EX_type, args.rank)

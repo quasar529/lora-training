@@ -19,6 +19,7 @@ from utils import (
     make_W_zero,
     W_weight_copy,
     recon_error,
+    W_init_by_WplusAB,
 )
 from torch.optim.lr_scheduler import CosineAnnealingWarmRestarts, CosineAnnealingLR, ReduceLROnPlateau
 import wandb
@@ -167,24 +168,45 @@ def main():
     #     print(f"Test Loss: {test_loss:.3f} | Test PPL: {math.exp(test_loss):.3f}\n")
 
     ### 여기부터
+    # model = copy.deepcopy(Transformer(enc, dec, SRC_PAD_IDX, TRG_PAD_IDX, device).to(device))
+    # w_model = copy.deepcopy(Transformer(enc, dec, SRC_PAD_IDX, TRG_PAD_IDX, device).to(device))
+    # model.load_state_dict(
+    #     torch.load("/content/drive/MyDrive/LAB/lora-training/custom_template/checkpoints/base_transformer.pt"),
+    #     strict=False,
+    # )
+    # w_model.load_state_dict(
+    #     torch.load("/content/drive/MyDrive/LAB/lora-training/custom_template/checkpoints/base_transformer_copy.pt"),
+    #     strict=False,
+    # )
+
+    # rank = 64
+    # insert_lora(model, HIDDEN_DIM, rank)
+
+    # make_W_zero(model)
+    # # print(model.encoder.layers[0].self_attention.fc_q.weight.data)
+    # W_init_by_SVD(model, w_model, rank)
+
+    ex5_1_2_model = copy.deepcopy(Transformer(enc, dec, SRC_PAD_IDX, TRG_PAD_IDX, device))
+    insert_lora(ex5_1_2_model, HIDDEN_DIM, 2)  # LoRA insert
+    ex5_1_2_model.load_state_dict(
+        torch.load(
+            "/content/drive/MyDrive/LAB/lora-training/custom_template/checkpoints/EX5_1_2W=A32B32_dW=0_rank2_T_0=100_1st.pt"
+        ),
+        strict=False,
+    )
+    # ex5_1_2_model_criterion = nn.CrossEntropyLoss(ignore_index=TRG_PAD_IDX)
+    # test_loss = evaluate(ex5_1_2_model.to(device), test_iterator, ex5_1_2_model_criterion)
+    # print("### CHECK THE CONTINUITY ###")
+    # print(f"Test Loss: {test_loss:.3f} | Test PPL: {math.exp(test_loss):.3f}")
     model = copy.deepcopy(Transformer(enc, dec, SRC_PAD_IDX, TRG_PAD_IDX, device).to(device))
-    w_model = copy.deepcopy(Transformer(enc, dec, SRC_PAD_IDX, TRG_PAD_IDX, device).to(device))
     model.load_state_dict(
         torch.load("/content/drive/MyDrive/LAB/lora-training/custom_template/checkpoints/base_transformer.pt"),
         strict=False,
     )
-    w_model.load_state_dict(
-        torch.load("/content/drive/MyDrive/LAB/lora-training/custom_template/checkpoints/base_transformer_copy.pt"),
-        strict=False,
-    )
-
-    rank = 64
-    insert_lora(model, HIDDEN_DIM, rank)
-
-    make_W_zero(model)
-    # print(model.encoder.layers[0].self_attention.fc_q.weight.data)
-    W_init_by_SVD(model, w_model, rank)
-
+    insert_lora(model, HIDDEN_DIM, 2)  # LoRA insert
+    make_W_zero(model)  # W=0
+    W_init_by_WplusAB(model, ex5_1_2_model)
+    lora.mark_only_lora_as_trainable(model)  # F freeze
     # with torch.no_grad():
     #     for i in range(3):
     #         encoder_q_original_weight = w_model.encoder.layers[i].self_attention.fc_q.weight.data

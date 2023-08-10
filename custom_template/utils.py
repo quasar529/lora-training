@@ -172,19 +172,19 @@ def W_init_by_loraAB(model, lora_model):
     with torch.no_grad():
         for i in range(len_of_layers):
             model.encoder.layers[i].self_attention.fc_q.weight.copy_(
-                (loraA_q_encoder_weight_list[i] @ loraB_q_encoder_weight_list[i]).T
+                (loraA_q_encoder_weight_list[i].T @ loraB_q_encoder_weight_list[i].T).T
             )
 
             model.encoder.layers[i].self_attention.fc_v.weight.copy_(
-                (loraA_v_encoder_new_weight[i] @ loraB_v_encoder_new_weight[i]).T
+                (loraA_v_encoder_weight_list[i].T @ loraB_v_encoder_weight_list[i].T).T
             )
 
             model.decoder.layers[i].self_attention.fc_q.weight.copy_(
-                (loraA_q_decoder_new_weight[i] @ loraB_q_decoder_new_weight[i]).T
+                (loraA_q_decoder_weight_list[i].T @ loraB_q_decoder_weight_list[i].T).T
             )
 
             model.decoder.layers[i].self_attention.fc_v.weight.copy_(
-                (loraA_v_decoder_new_weight[i] @ loraB_v_decoder_new_weight[i]).T
+                (loraA_v_decoder_weight_list[i].T @ loraB_v_decoder_weight_list[i].T).T
             )
 
 
@@ -297,3 +297,68 @@ def W_init_by_SVD(model, SVD_model, rank):
                     w_v_decoder_loraA_weights[i] @ w_v_decoder_loraB_weights[i],
                 ),
             )
+
+
+def W_init_by_WplusAB(model, lora_model):
+    len_of_layers = len(model.encoder.layers)
+    loraA_q_encoder_weight_list = []
+    loraB_q_encoder_weight_list = []
+
+    loraA_v_encoder_weight_list = []
+    loraB_v_encoder_weight_list = []
+
+    loraA_q_decoder_weight_list = []
+    loraB_q_decoder_weight_list = []
+
+    loraA_v_decoder_weight_list = []
+    loraB_v_decoder_weight_list = []
+
+    with torch.no_grad():
+        for i in range(len_of_layers):
+            loraA_q_encoder_new_weight = lora_model.encoder.layers[i].self_attention.fc_q.lora_A
+            loraA_q_encoder_weight_list.append(loraA_q_encoder_new_weight)
+            loraB_q_encoder_new_weight = lora_model.encoder.layers[i].self_attention.fc_q.lora_B
+            loraB_q_encoder_weight_list.append(loraB_q_encoder_new_weight)
+
+            loraA_v_encoder_new_weight = lora_model.encoder.layers[i].self_attention.fc_v.lora_A
+            loraA_v_encoder_weight_list.append(loraA_v_encoder_new_weight)
+            loraB_v_encoder_new_weight = lora_model.encoder.layers[i].self_attention.fc_v.lora_B
+            loraB_v_encoder_weight_list.append(loraB_v_encoder_new_weight)
+
+            loraA_q_decoder_new_weight = lora_model.decoder.layers[i].self_attention.fc_q.lora_A
+            loraA_q_decoder_weight_list.append(loraA_q_decoder_new_weight)
+            loraB_q_decoder_new_weight = lora_model.decoder.layers[i].self_attention.fc_q.lora_B
+            loraB_q_decoder_weight_list.append(loraB_q_decoder_new_weight)
+
+            loraA_v_decoder_new_weight = lora_model.decoder.layers[i].self_attention.fc_v.lora_A
+            loraA_v_decoder_weight_list.append(loraA_v_decoder_new_weight)
+            loraB_v_decoder_new_weight = lora_model.decoder.layers[i].self_attention.fc_v.lora_B
+            loraB_v_decoder_weight_list.append(loraB_v_decoder_new_weight)
+
+    with torch.no_grad():
+        for i in range(len_of_layers):
+            encoder_q_plus_AB = (
+                lora_model.encoder.layers[i].self_attention.fc_q.weight.data.T
+                + (loraA_q_encoder_weight_list[i].T @ loraB_q_encoder_weight_list[i].T)
+            ).T
+            encoder_v_plus_AB = (
+                lora_model.encoder.layers[i].self_attention.fc_v.weight.data.T
+                + (loraA_v_encoder_weight_list[i].T @ loraB_v_encoder_weight_list[i].T)
+            ).T
+
+            decoder_q_plus_AB = (
+                lora_model.decoder.layers[i].self_attention.fc_q.weight.data.T
+                + (loraA_q_decoder_weight_list[i].T @ loraB_q_decoder_weight_list[i].T)
+            ).T
+            decoder_v_plus_AB = (
+                lora_model.decoder.layers[i].self_attention.fc_v.weight.data.T
+                + (loraA_v_decoder_weight_list[i].T @ loraB_v_decoder_weight_list[i].T)
+            ).T
+
+            model.encoder.layers[i].self_attention.fc_q.weight.copy_(encoder_q_plus_AB)
+
+            model.encoder.layers[i].self_attention.fc_v.weight.copy_(encoder_v_plus_AB)
+
+            model.decoder.layers[i].self_attention.fc_q.weight.copy_(decoder_q_plus_AB)
+
+            model.decoder.layers[i].self_attention.fc_v.weight.copy_(decoder_v_plus_AB)
