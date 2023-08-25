@@ -361,3 +361,111 @@ class Transformer(nn.Module):
         # attention: [batch_size, n_heads, trg_len, src_len]
 
         return output, attention
+
+
+import math
+
+
+### Pytorch Tutorial Base Transformer ###
+class custom_TransformerEncoderLayer(nn.TransformerEncoderLayer):
+    def __init__(self, d_model, nhead, dropout_ratio, device):
+        super().__init__()
+        self.self_attn = MultiHeadAttentionLayer(d_model, nhead, dropout_ratio, device)
+
+
+class PositionalEncoding_sincos(nn.Module):
+    """
+    https://pytorch.org/tutorials/beginner/transformer_tutorial.html
+    """
+
+    def __init__(self, d_model, vocab_size=5000, dropout=0.1):
+        super().__init__()
+        self.dropout = nn.Dropout(p=dropout)
+
+        pe = torch.zeros(vocab_size, d_model)
+        position = torch.arange(0, vocab_size, dtype=torch.float).unsqueeze(1)
+        div_term = torch.exp(torch.arange(0, d_model, 2).float() * (-math.log(10000.0) / d_model))
+        pe[:, 0::2] = torch.sin(position * div_term)
+        pe[:, 1::2] = torch.cos(position * div_term)
+        pe = pe.unsqueeze(0)
+        self.register_buffer("pe", pe)
+
+    def forward(self, x):
+        x = x + self.pe[:, : x.size(1), :]
+        return self.dropout(x)
+
+
+# class Transformer_classifier(nn.Module):
+#     """
+#     Text classifier based on a pytorch TransformerEncoder.
+#     """
+
+#     def __init__(
+#         self,
+#         embeddings,
+#         nhead=8,
+#         dim_feedforward=2048,
+#         num_layers=3,
+#         dropout=0.1,
+#     ):
+
+#         super().__init__()
+
+#         vocab_size, d_model = embeddings.size()
+#         #print(vocab_size,d_model)
+#         assert d_model % nhead == 0, "nheads must divide evenly into d_model"
+
+#         self.emb = nn.Embedding.from_pretrained(embeddings, freeze=False)
+
+#         self.pos_encoder = PositionalEncoding_sincos(
+#             d_model=d_model,
+#             dropout=dropout,
+#             vocab_size=vocab_size,
+#         )
+
+#         encoder_layer = nn.TransformerEncoderLayer(
+#             d_model=d_model,
+#             nhead=nhead,
+#             dim_feedforward=dim_feedforward,
+#             dropout=dropout,
+#         )
+#         self.transformer_encoder = nn.TransformerEncoder(
+#             encoder_layer,
+#             num_layers=num_layers,
+#         )
+#         self.classifier = nn.Linear(d_model, 2)
+#         self.d_model = d_model
+
+#     def forward(self, x):
+#         x = self.emb(x) * math.sqrt(self.d_model)
+#         x = self.pos_encoder(x)
+#         x = self.transformer_encoder(x)
+#         x = x.mean(dim=1)
+#         x = self.classifier(x)
+
+
+#         return x
+class TransformerClassifier(nn.Module):
+    def __init__(self, encoder, hidden_dim, output_dim, src_pad_idx, dropout_ratio, device):
+        super().__init__()
+
+        self.encoder = encoder
+        self.src_pad_idx = src_pad_idx
+        self.device = device
+        self.fc = nn.Linear(hidden_dim, output_dim)  # 예측을 위한 완전연결(FC) 레이어 추가
+        self.dropout = nn.Dropout(dropout_ratio)
+
+    def make_src_mask(self, src):
+        src_mask = (src != self.src_pad_idx).unsqueeze(1).unsqueeze(2)
+        return src_mask
+
+    def forward(self, src):
+        src_mask = self.make_src_mask(src)
+        enc_src = self.encoder(src, src_mask)
+
+        # Global Avg Pool 레이어 추가
+        gap = enc_src.mean(dim=1)
+
+        output = self.fc(self.dropout(gap))
+
+        return output

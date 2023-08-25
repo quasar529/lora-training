@@ -117,3 +117,4 @@ wandb
 ngrok
 ngrok-stable-linux-amd64.zip
 cloudflared
+.data
