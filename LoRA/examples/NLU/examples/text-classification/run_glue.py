@@ -1,3 +1,4 @@
+스토리지가 얼마 남지 않음 … 스토리지가 부족하면 파일을 만들고 수정하거나, Gmail로 이메일을 주고받거나, Google 포토에 백업할 수 없습니다.
 #!/usr/bin/env python
 # coding=utf-8
 # Copyright 2020 The HuggingFace Inc. team. All rights reserved.
@@ -44,6 +45,11 @@ from transformers import (
 from transformers.trainer_utils import get_last_checkpoint, is_main_process
 from transformers.utils import check_min_version
 
+import wandb
+import loralib as lora
+
+wandb.init()
+
 
 # Will error if the minimal version of Transformers is not installed. Remove at your own risks.
 check_min_version("4.4.0")
@@ -61,6 +67,10 @@ task_to_keys = {
 }
 
 logger = logging.getLogger(__name__)
+
+
+def count_parameters(model):
+    return sum(p.numel() for p in model.parameters() if p.requires_grad)
 
 
 @dataclass
@@ -95,7 +105,7 @@ class DataTrainingArguments:
         },
     )
     max_train_samples: Optional[int] = field(
-        default=None,
+        default=10000,
         metadata={
             "help": "For debugging purposes or quicker training, truncate the number of training examples to this "
             "value if set."
@@ -174,15 +184,15 @@ class ModelArguments:
         },
     )
     apply_lora: Optional[bool] = field(
-        default=False,
+        default=True,
         metadata={"help": "Whether to apply LoRA or not."},
     )
     lora_alpha: Optional[int] = field(
-        default=None,
+        default=8,
         metadata={"help": "LoRA alpha"},
     )
     lora_r: Optional[int] = field(
-        default=None,
+        default=8,
         metadata={"help": "LoRA r"},
     )
     lora_path: Optional[str] = field(
@@ -198,7 +208,7 @@ class ModelArguments:
         metadata={"help": "The file path of adapter parameters."},
     )
     adapter_type: Optional[str] = field(
-        default='houlsby',
+        default="houlsby",
         metadata={"help": "houlsby or pfeiffer"},
     )
     adapter_size: Optional[int] = field(
@@ -218,21 +228,21 @@ class ModelArguments:
         metadata={"help": "Token Masking Probability"},
     )
 
-    
+
 def main():
     # See all possible arguments in src/transformers/training_args.py
     # or by passing the --help flag to this script.
     # We now keep distinct sets of args, for a cleaner separation of concerns.
 
     parser = HfArgumentParser((ModelArguments, DataTrainingArguments, TrainingArguments))
-    if len(sys.argv) == 2 and sys.argv[1].endswith(".json"):
-        # If we pass only one argument to the script and it's the path to a json file,
-        # let's parse it to get our arguments.
-        model_args, data_args, training_args = parser.parse_json_file(json_file=os.path.abspath(sys.argv[1]))
-    else:
-        model_args, data_args, training_args = parser.parse_args_into_dataclasses()
+    # if len(sys.argv) == 2 and sys.argv[1].endswith(".json"):
+    #     # If we pass only one argument to the script and it's the path to a json file,
+    #     # let's parse it to get our arguments.
+    #     model_args, data_args, training_args = parser.parse_json_file(json_file=os.path.abspath(sys.argv[1]))
+    # else:
+    model_args, data_args, training_args = parser.parse_args_into_dataclasses()
 
-    torch.use_deterministic_algorithms(training_args.use_deterministic_algorithms)
+    # torch.use_deterministic_algorithms(training_args.use_deterministic_algorithms)
     logger.info("use_deterministic_algorithms: " + str(torch.are_deterministic_algorithms_enabled()))
 
     # Detecting last checkpoint.
@@ -349,7 +359,7 @@ def main():
         cache_dir=model_args.cache_dir,
         revision=model_args.model_revision,
         use_auth_token=True if model_args.use_auth_token else None,
-        cls_dropout=training_args.cls_dropout,
+        cls_dropout=0,  # training_args.cls_dropout,
         apply_lora=model_args.apply_lora,
         lora_alpha=model_args.lora_alpha,
         lora_r=model_args.lora_r,
@@ -382,40 +392,50 @@ def main():
             logger.info(f"Apply LoRA state dict from {model_args.lora_path}.")
             logger.info(lora_state_dict.keys())
             model.load_state_dict(lora_state_dict, strict=False)
-        trainable_params.append('lora')
+        print("### LORA ###")
+        trainable_params.append("lora")
 
     if model_args.apply_adapter:
         if model_args.adapter_path is not None:
-            adapter_state_dict = torch.load(os.path.join(model_args.adapter_path, 'pytorch_adapter.bin'))
-            head_state_dict = torch.load(os.path.join(model_args.adapter_path, 'pytorch_model_head.bin'))
+            adapter_state_dict = torch.load(os.path.join(model_args.adapter_path, "pytorch_adapter.bin"))
+            head_state_dict = torch.load(os.path.join(model_args.adapter_path, "pytorch_model_head.bin"))
             added_state_dict = {}
             for k, v in adapter_state_dict.items():
-                new_k = k.replace(data_args.task_name + '.', '').replace('adapter_down.0.', 'adapter_A.').replace('adapter_up.', 'adapter_B.').replace('.adapters.', '.adapter.')
+                new_k = (
+                    k.replace(data_args.task_name + ".", "")
+                    .replace("adapter_down.0.", "adapter_A.")
+                    .replace("adapter_up.", "adapter_B.")
+                    .replace(".adapters.", ".adapter.")
+                )
                 added_state_dict[new_k] = v
             for k, v in head_state_dict.items():
-                new_k = k.replace('heads.' + data_args.task_name + '.1', 'classifier.dense').replace('heads.' + data_args.task_name + '.4', 'classifier.out_proj')
+                new_k = k.replace("heads." + data_args.task_name + ".1", "classifier.dense").replace(
+                    "heads." + data_args.task_name + ".4", "classifier.out_proj"
+                )
                 added_state_dict[new_k] = v
             logger.info(f"Apply adapter state dict from {model_args.adapter_path}.")
             logger.info(added_state_dict.keys())
             missing_keys, unexpected_keys = model.load_state_dict(added_state_dict, strict=False)
             for missing_key in missing_keys:
-                assert 'adapter' not in missing_key, missing_key + ' is missed in the model'
-            assert len(unexpected_keys) == 0, 'Unexpected keys ' + str(unexpected_keys)
-        trainable_params.append('adapter')
+                assert "adapter" not in missing_key, missing_key + " is missed in the model"
+            assert len(unexpected_keys) == 0, "Unexpected keys " + str(unexpected_keys)
+        trainable_params.append("adapter")
 
     if model_args.apply_bitfit:
-        trainable_params.append('bias')
+        trainable_params.append("bias")
 
     if len(trainable_params) > 0:
         for name, param in model.named_parameters():
-            if name.startswith('deberta') or name.startswith('roberta'):
+            if name.startswith("deberta") or name.startswith("roberta"):
                 param.requires_grad = False
                 for trainable_param in trainable_params:
                     if trainable_param in name:
                         param.requires_grad = True
+                        print(f"Trainalble LAYER NAME : {name}")
                         break
             else:
                 param.requires_grad = True
+                print(f"Trainalble LAYER NAME : {name}")
 
     # Preprocessing the datasets
     if data_args.task_name is not None:
@@ -546,6 +566,20 @@ def main():
 
     # Training
     if training_args.do_train:
+        print("### START TRAIN ####")
+        print(model)
+        print(f"PARAMETERS : {count_parameters(model)}")
+        for i in range(12):
+            if model_args.apply_lora:
+                model.roberta.encoder.layer[i].attention.self.query = lora.Linear(
+                    768, 768, model_args.lora_r, lora_alpha=model_args.lora_alpha
+                )
+                model.roberta.encoder.layer[i].attention.self.value = lora.Linear(
+                    768, 768, model_args.lora_r, lora_alpha=model_args.lora_alpha
+                )
+        print(model.roberta.encoder.layer[0].attention.self.query.lora_A)
+        print(model.roberta.encoder.layer[0].attention.self.query.lora_B)
+        print(f"PARAMETERS : {count_parameters(model)}")
         checkpoint = None
         if last_checkpoint is not None:
             checkpoint = last_checkpoint
