@@ -1,4 +1,3 @@
-스토리지가 얼마 남지 않음 … 스토리지가 부족하면 파일을 만들고 수정하거나, Gmail로 이메일을 주고받거나, Google 포토에 백업할 수 없습니다.
 #!/usr/bin/env python
 # coding=utf-8
 # Copyright 2020 The HuggingFace Inc. team. All rights reserved.
@@ -47,6 +46,7 @@ from transformers.utils import check_min_version
 
 import wandb
 import loralib as lora
+import copy
 
 wandb.init()
 
@@ -71,6 +71,91 @@ logger = logging.getLogger(__name__)
 
 def count_parameters(model):
     return sum(p.numel() for p in model.parameters() if p.requires_grad)
+
+
+def recon_error(original_weight, approx_weight):
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    return torch.linalg.norm(original_weight.to(device) - approx_weight.to(device), "fro")
+
+
+def insert_lora(model, dim, rank, lora_alpha=128):
+    len_of_layers = 12  # len(model.roberta.encoder)
+    for i in range(len_of_layers):
+        model.roberta.encoder.layer[i].attention.self.query = copy.deepcopy(
+            lora.Linear(dim, dim, r=rank, lora_alpha=lora_alpha, merge_weights=False)
+        )
+        model.roberta.encoder.layer[i].attention.self.value = copy.deepcopy(
+            lora.Linear(dim, dim, r=rank, lora_alpha=lora_alpha, merge_weights=False)
+        )
+
+
+def make_W_zero(model):
+    len_of_layers = 12  # len(model.encoder.layers)
+    with torch.no_grad():
+        for i in range(len_of_layers):
+            model.roberta.encoder.layer[i].attention.self.query.weight.data.zero_()
+            model.roberta.encoder.layer[i].attention.self.value.weight.data.zero_()
+
+
+def W_init_by_SVD(SVD_model, rank):
+    w_q_encoder_loraA_weights = []
+    w_q_encoder_loraB_weights = []
+
+    w_v_encoder_loraA_weights = []
+    w_v_encoder_loraB_weights = []
+
+    len_of_layers = 12  # len(SVD_model.roberta.encoder.layer)
+    with torch.no_grad():
+        for i in range(len_of_layers):
+            encoder_q_original_weight = SVD_model.roberta.encoder.layer[i].attention.self.query.weight.data.T
+            encoder_v_original_weight = SVD_model.roberta.encoder.layer[i].attention.self.query.weight.data.T
+
+            encoder_q_u, encoder_q_s, encoder_q_v = torch.linalg.svd(encoder_q_original_weight)
+            encoder_v_u, encoder_v_s, encoder_v_v = torch.linalg.svd(encoder_v_original_weight)
+
+            approx_rank = rank
+
+            # w_q_encoder
+            # torch.Size([256, 64])
+            w_q_encoder_loraA_weights.append(
+                encoder_q_u[:, :approx_rank] @ torch.diag(encoder_q_s[:approx_rank]).sqrt()
+            )
+            # torch.Size([64, 256])
+            w_q_encoder_loraB_weights.append(
+                torch.diag(encoder_q_s[:approx_rank]).sqrt() @ encoder_q_v[:approx_rank, :]
+            )
+            # w_v_encoder
+            w_v_encoder_loraA_weights.append(
+                encoder_v_u[:, :approx_rank] @ torch.diag(encoder_v_s[:approx_rank]).sqrt()
+            )
+            w_v_encoder_loraB_weights.append(
+                torch.diag(encoder_v_s[:approx_rank]).sqrt() @ encoder_v_v[:approx_rank, :]
+            )
+    insert_lora(SVD_model, 768, approx_rank)
+    og_weight = SVD_model.roberta.encoder.layer[0].attention.self.query.weight.data.T
+    with torch.no_grad():
+        for i in range(len_of_layers):
+            SVD_model.roberta.encoder.layer[i].attention.self.query.lora_A.copy_(
+                w_q_encoder_loraA_weights[i].transpose(0, 1)
+            )
+            SVD_model.roberta.encoder.layer[i].attention.self.query.lora_B.copy_(
+                w_q_encoder_loraB_weights[i].transpose(0, 1)
+            )
+
+            SVD_model.roberta.encoder.layer[i].attention.self.value.lora_A.copy_(
+                w_v_encoder_loraA_weights[i].transpose(0, 1)
+            )
+            SVD_model.roberta.encoder.layer[i].attention.self.value.lora_B.copy_(
+                w_v_encoder_loraB_weights[i].transpose(0, 1)
+            )
+    print(
+        "if this is not 0, there may be a problem.\n",
+        recon_error(
+            og_weight,
+            SVD_model.roberta.encoder.layer[0].attention.self.query.lora_A.T
+            @ SVD_model.roberta.encoder.layer[0].attention.self.query.lora_B.T,
+        ),
+    )
 
 
 @dataclass
@@ -105,7 +190,7 @@ class DataTrainingArguments:
         },
     )
     max_train_samples: Optional[int] = field(
-        default=10000,
+        default=None,
         metadata={
             "help": "For debugging purposes or quicker training, truncate the number of training examples to this "
             "value if set."
@@ -569,16 +654,31 @@ def main():
         print("### START TRAIN ####")
         print(model)
         print(f"PARAMETERS : {count_parameters(model)}")
-        for i in range(12):
-            if model_args.apply_lora:
-                model.roberta.encoder.layer[i].attention.self.query = lora.Linear(
-                    768, 768, model_args.lora_r, lora_alpha=model_args.lora_alpha
-                )
-                model.roberta.encoder.layer[i].attention.self.value = lora.Linear(
-                    768, 768, model_args.lora_r, lora_alpha=model_args.lora_alpha
-                )
-        print(model.roberta.encoder.layer[0].attention.self.query.lora_A)
-        print(model.roberta.encoder.layer[0].attention.self.query.lora_B)
+        # for i in range(12):
+        #     if model_args.apply_lora:
+        #         model.roberta.encoder.layer[i].attention.self.query = lora.Linear(
+        #             768, 768, model_args.lora_r, lora_alpha=model_args.lora_alpha
+        #         )
+        #         model.roberta.encoder.layer[i].attention.self.value = lora.Linear(
+        #             768, 768, model_args.lora_r, lora_alpha=model_args.lora_alpha
+        #         )
+        # print(model.roberta.encoder.layer[0].attention.self.query.lora_A)
+        # print(model.roberta.encoder.layer[0].attention.self.query.lora_B)
+        W_init_by_SVD(model, 64)
+        make_W_zero(model)
+        # lora.mark_only_lora_as_trainable(model)
+        if len(trainable_params) > 0:
+            for name, param in model.named_parameters():
+                if name.startswith("deberta") or name.startswith("roberta"):
+                    param.requires_grad = False
+                    for trainable_param in trainable_params:
+                        if trainable_param in name:
+                            param.requires_grad = True
+                            print(f"Trainalble LAYER NAME from trainable_params : {name}")
+                            break
+                else:
+                    param.requires_grad = False
+                    # print(f"Trainalble LAYER NAME : {name}")
         print(f"PARAMETERS : {count_parameters(model)}")
         checkpoint = None
         if last_checkpoint is not None:
