@@ -456,7 +456,7 @@ class TrainingArguments:
     )
 
     load_best_model_at_end: Optional[bool] = field(
-        default=False,
+        default=True,
         metadata={"help": "Whether or not to load the best model found during training at the end of training."},
     )
     metric_for_best_model: Optional[str] = field(
@@ -510,7 +510,9 @@ class TrainingArguments:
     )
     _n_gpu: int = field(init=False, repr=False, default=-1)
     cls_dropout: Optional[float] = field(default=None, metadata={"help": "cls drop out."})
-    use_deterministic_algorithms: Optional[bool] = field(default=False, metadata={"help": "Whether or not to use deterministic algorithms."})
+    use_deterministic_algorithms: Optional[bool] = field(
+        default=False, metadata={"help": "Whether or not to use deterministic algorithms."}
+    )
 
     def __post_init__(self):
         # expand paths, if not os.makedirs("~/bar") will make directory

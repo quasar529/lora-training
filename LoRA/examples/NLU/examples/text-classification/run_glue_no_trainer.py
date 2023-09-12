@@ -39,6 +39,10 @@ from transformers import (
     set_seed,
 )
 
+import torch
+import wandb
+import loralib as lora
+
 
 logger = logging.getLogger(__name__)
 
@@ -53,6 +57,190 @@ task_to_keys = {
     "stsb": ("sentence1", "sentence2"),
     "wnli": ("sentence1", "sentence2"),
 }
+
+
+def count_parameters(model):
+    return sum(p.numel() for p in model.parameters() if p.requires_grad)
+
+
+def recon_error(original_weight, approx_weight):
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    return torch.linalg.norm(original_weight.to(device) - approx_weight.to(device), "fro")
+
+
+def insert_lora(model, dim, rank, lora_alpha):
+    len_of_layers = 12  # len(model.roberta.encoder)
+    for i in range(len_of_layers):
+        model.roberta.encoder.layer[i].attention.self.query = copy.deepcopy(
+            lora.Linear(dim, dim, r=rank, lora_alpha=lora_alpha, merge_weights=False)
+        )
+        model.roberta.encoder.layer[i].attention.self.value = copy.deepcopy(
+            lora.Linear(dim, dim, r=rank, lora_alpha=lora_alpha, merge_weights=False)
+        )
+
+
+def W_weight_copy(new_model, W_model):
+    len_of_layers = 12
+    q_encoder_weight_list = []
+    v_encoder_weight_list = []
+    q_encoder_bias_list = []
+    v_encoder_bias_list = []
+
+    for i in range(len_of_layers):
+        q_encoder_new_weight = W_model.roberta.encoder.layer[i].attention.self.query.weight.data
+        q_encoder_weight_list.append(q_encoder_new_weight)
+        q_encoder_new_bias = W_model.roberta.encoder.layer[i].attention.self.query.bias.data
+        q_encoder_bias_list.append(q_encoder_new_bias)
+
+        v_encoder_new_weight = W_model.roberta.encoder.layer[i].attention.self.value.weight.data
+        v_encoder_weight_list.append(v_encoder_new_weight)
+        v_encoder_new_bias = W_model.roberta.encoder.layer[i].attention.self.value.bias.data
+        v_encoder_bias_list.append(v_encoder_new_bias)
+
+    with torch.no_grad():
+        for i in range(len_of_layers):
+            new_model.roberta.encoder.layer[i].attention.self.query.weight.data.copy_(q_encoder_weight_list[i])
+            new_model.roberta.encoder.layer[i].attention.self.value.weight.data.copy_(v_encoder_weight_list[i])
+            new_model.roberta.encoder.layer[i].attention.self.query.bias.data.copy_(q_encoder_bias_list[i])
+            new_model.roberta.encoder.layer[i].attention.self.value.bias.data.copy_(v_encoder_bias_list[i])
+
+
+def make_W_zero(model):
+    len_of_layers = 12  # len(model.encoder.layers)
+    with torch.no_grad():
+        for i in range(len_of_layers):
+            model.roberta.encoder.layer[i].attention.self.query.weight.data.zero_()
+            model.roberta.encoder.layer[i].attention.self.value.weight.data.zero_()
+
+
+def dW_init_by_SVD(model, SVD_model, rank):
+    w_q_encoder_loraA_weights = []
+    w_q_encoder_loraB_weights = []
+
+    w_v_encoder_loraA_weights = []
+    w_v_encoder_loraB_weights = []
+
+    len_of_layers = 12  # len(SVD_model.roberta.encoder.layer)
+    with torch.no_grad():
+        for i in range(len_of_layers):
+            encoder_q_original_weight = SVD_model.roberta.encoder.layer[i].attention.self.query.weight.data
+            encoder_v_original_weight = SVD_model.roberta.encoder.layer[i].attention.self.value.weight.data
+
+            encoder_q_u, encoder_q_s, encoder_q_v = torch.linalg.svd(encoder_q_original_weight)
+            encoder_v_u, encoder_v_s, encoder_v_v = torch.linalg.svd(encoder_v_original_weight)
+
+            approx_rank = rank
+
+            # w_q_encoder
+            # torch.Size([768, rank])
+            w_q_encoder_loraA_weights.append(
+                encoder_q_u[:, :approx_rank] @ torch.diag(encoder_q_s[:approx_rank]).sqrt()
+            )
+            # torch.Size([rank, 768])
+            w_q_encoder_loraB_weights.append(
+                torch.diag(encoder_q_s[:approx_rank]).sqrt() @ encoder_q_v[:approx_rank, :]
+            )
+            # w_v_encoder
+            w_v_encoder_loraA_weights.append(
+                encoder_v_u[:, :approx_rank] @ torch.diag(encoder_v_s[:approx_rank]).sqrt()
+            )
+            w_v_encoder_loraB_weights.append(
+                torch.diag(encoder_v_s[:approx_rank]).sqrt() @ encoder_v_v[:approx_rank, :]
+            )
+    og_weight = SVD_model.roberta.encoder.layer[0].attention.self.query.weight.data
+    # insert_lora(SVD_model, 768, approx_rank, lora_alpha)
+
+    with torch.no_grad():
+        for i in range(len_of_layers):
+            model.roberta.encoder.layer[i].attention.self.query.lora_A.copy_(
+                w_q_encoder_loraA_weights[i].transpose(0, 1)
+            )
+            model.roberta.encoder.layer[i].attention.self.query.lora_B.copy_(
+                w_q_encoder_loraB_weights[i].transpose(0, 1)
+            )
+
+            model.roberta.encoder.layer[i].attention.self.value.lora_A.copy_(
+                w_v_encoder_loraA_weights[i].transpose(0, 1)
+            )
+            model.roberta.encoder.layer[i].attention.self.value.lora_B.copy_(
+                w_v_encoder_loraB_weights[i].transpose(0, 1)
+            )
+    print(f"OG weight Norm : {torch.linalg.norm(og_weight)}")
+    approx_weight = (
+        model.roberta.encoder.layer[0].attention.self.query.lora_A.T
+        @ model.roberta.encoder.layer[0].attention.self.query.lora_B.T
+    )
+    print(f"recon error between OG and rank_{approx_rank} SVD weight : {recon_error(og_weight,approx_weight)} ")
+
+
+def dW_init_by_WplusAB(model, lora_model):
+    len_of_layers = 12
+    loraA_q_encoder_weight_list = []
+    loraB_q_encoder_weight_list = []
+
+    loraA_v_encoder_weight_list = []
+    loraB_v_encoder_weight_list = []
+
+    with torch.no_grad():
+        for i in range(len_of_layers):
+            loraA_q_encoder_new_weight = lora_model.roberta.encoder.layer[i].attention.self.query.lora_A
+            loraA_q_encoder_weight_list.append(loraA_q_encoder_new_weight)
+            loraB_q_encoder_new_weight = lora_model.roberta.encoder.layer[i].attention.self.query.lora_B
+            loraB_q_encoder_weight_list.append(loraB_q_encoder_new_weight)
+
+            loraA_v_encoder_new_weight = lora_model.roberta.encoder.layer[i].attention.self.value.lora_A
+            loraA_v_encoder_weight_list.append(loraA_v_encoder_new_weight)
+            loraB_v_encoder_new_weight = lora_model.roberta.encoder.layer[i].attention.self.value.lora_B
+            loraB_v_encoder_weight_list.append(loraB_v_encoder_new_weight)
+
+    with torch.no_grad():
+        for i in range(len_of_layers):
+            encoder_q_plus_AB = (
+                lora_model.roberta.encoder.layer[i].attention.self.query.weight.data.T
+                + (loraA_q_encoder_weight_list[i].T @ loraB_q_encoder_weight_list[i].T)
+            ).T
+            encoder_v_plus_AB = (
+                lora_model.roberta.encoder.layer[i].attention.self.value.weight.data.T
+                + (loraA_v_encoder_weight_list[i].T @ loraB_v_encoder_weight_list[i].T)
+            ).T
+
+            model.roberta.encoder.layer[i].attention.self.query.weight.copy_(encoder_q_plus_AB)
+
+            model.roberta.encoder.layer[i].attention.self.value.weight.copy_(encoder_v_plus_AB)
+
+
+def W_init_by_loraAB(model, lora_model):
+    """
+    model의 W weight를 lora_model의 Lora Layer의 weight로 초기화
+    """
+    len_of_layers = 12
+    loraA_q_encoder_weight_list = []
+    loraB_q_encoder_weight_list = []
+
+    loraA_v_encoder_weight_list = []
+    loraB_v_encoder_weight_list = []
+
+    with torch.no_grad():
+        for i in range(len_of_layers):
+            loraA_q_encoder_new_weight = lora_model.roberta.encoder.layer[i].attention.self.query.lora_A
+            loraA_q_encoder_weight_list.append(loraA_q_encoder_new_weight)
+            loraB_q_encoder_new_weight = lora_model.roberta.encoder.layer[i].attention.self.query.lora_B
+            loraB_q_encoder_weight_list.append(loraB_q_encoder_new_weight)
+
+            loraA_v_encoder_new_weight = lora_model.roberta.encoder.layer[i].attention.self.value.lora_A
+            loraA_v_encoder_weight_list.append(loraA_v_encoder_new_weight)
+            loraB_v_encoder_new_weight = lora_model.roberta.encoder.layer[i].attention.self.value.lora_B
+            loraB_v_encoder_weight_list.append(loraB_v_encoder_new_weight)
+
+    with torch.no_grad():
+        for i in range(len_of_layers):
+            model.roberta.encoder.layer[i].attention.self.query.weight.copy_(
+                (loraA_q_encoder_weight_list[i].T @ loraB_q_encoder_weight_list[i].T).T
+            )
+
+            model.roberta.encoder.layer[i].attention.self.value.weight.copy_(
+                (loraA_v_encoder_weight_list[i].T @ loraB_v_encoder_weight_list[i].T).T
+            )
 
 
 def parse_args():
@@ -104,7 +292,7 @@ def parse_args():
     parser.add_argument(
         "--per_device_eval_batch_size",
         type=int,
-        default=8,
+        default=64,
         help="Batch size (per device) for the evaluation dataloader.",
     )
     parser.add_argument(
@@ -114,7 +302,7 @@ def parse_args():
         help="Initial learning rate (after the potential warmup period) to use.",
     )
     parser.add_argument("--weight_decay", type=float, default=0.0, help="Weight decay to use.")
-    parser.add_argument("--num_train_epochs", type=int, default=3, help="Total number of training epochs to perform.")
+    parser.add_argument("--num_train_epochs", type=int, default=10, help="Total number of training epochs to perform.")
     parser.add_argument(
         "--max_train_steps",
         type=int,
@@ -135,10 +323,13 @@ def parse_args():
         choices=["linear", "cosine", "cosine_with_restarts", "polynomial", "constant", "constant_with_warmup"],
     )
     parser.add_argument(
-        "--num_warmup_steps", type=int, default=0, help="Number of steps for the warmup in the lr scheduler."
+        "--num_warmup_steps", type=int, default=10, help="Number of steps for the warmup in the lr scheduler."
     )
     parser.add_argument("--output_dir", type=str, default=None, help="Where to store the final model.")
     parser.add_argument("--seed", type=int, default=None, help="A seed for reproducible training.")
+    parser.add_argument("--do_train", type=bool, default=True, help="Whether to run training.")
+    parser.add_argument("--do_eval", type=bool, default=True, help="Whether to run eval on the dev set.")
+    parser.add_argument("--lora_r", type=int, default=None, help="Rank of LoRA")
     args = parser.parse_args()
 
     # Sanity checks
@@ -382,23 +573,49 @@ def main():
     progress_bar = tqdm(range(args.max_train_steps), disable=not accelerator.is_local_main_process)
     completed_steps = 0
 
-    for epoch in range(args.num_train_epochs):
-        model.train()
-        for step, batch in enumerate(train_dataloader):
-            outputs = model(**batch)
-            loss = outputs.loss
-            loss = loss / args.gradient_accumulation_steps
-            accelerator.backward(loss)
-            if step % args.gradient_accumulation_steps == 0 or step == len(train_dataloader) - 1:
-                optimizer.step()
-                lr_scheduler.step()
-                optimizer.zero_grad()
-                progress_bar.update(1)
-                completed_steps += 1
+    if args.do_train:
+        wandb.init(
+            group=f"dW init by SVD from HG ckpt",
+            name=f"RANK{args.lora_r}_{args.model_name_or_path}_{args.task_name}",
+            config={
+                "learning_rate": args.learning_rate,
+                "num_train_epochs": args.num_train_epochs,
+                "batch_size": 64,
+                "seed": 0,
+                "lora_r": args.lora_r,
+            },
+        )
+        for epoch in range(args.num_train_epochs):
+            model.train()
+            for step, batch in enumerate(train_dataloader):
+                outputs = model(**batch)
+                loss = outputs.loss
+                loss = loss / args.gradient_accumulation_steps
+                accelerator.backward(loss)
+                if step % args.gradient_accumulation_steps == 0 or step == len(train_dataloader) - 1:
+                    optimizer.step()
+                    lr_scheduler.step()
+                    optimizer.zero_grad()
+                    progress_bar.update(1)
+                    completed_steps += 1
 
-            if completed_steps >= args.max_train_steps:
-                break
+                if completed_steps >= args.max_train_steps:
+                    break
 
+            model.eval()
+            for step, batch in enumerate(eval_dataloader):
+                outputs = model(**batch)
+                predictions = outputs.logits.argmax(dim=-1)
+                metric.add_batch(
+                    predictions=accelerator.gather(predictions),
+                    references=accelerator.gather(batch["labels"]),
+                )
+
+            eval_metric = metric.compute()
+            logger.info(f"epoch {epoch}: {eval_metric}")
+
+    # Evaluation
+    if not args.do_train and args.do_eval:
         model.eval()
         for step, batch in enumerate(eval_dataloader):
             outputs = model(**batch)

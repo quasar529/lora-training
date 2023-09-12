@@ -118,3 +118,10 @@ ngrok
 ngrok-stable-linux-amd64.zip
 cloudflared
 .data
+
+*.bin
+*.pth
+LoRA/examples/NLU/sst2/
+LoRA/examples/NLU/rte/
+LoRA/examples/NLU//output/
+events.out.tfevents.*

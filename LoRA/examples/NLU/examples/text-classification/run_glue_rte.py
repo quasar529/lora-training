@@ -27,7 +27,6 @@ from typing import Optional
 import numpy as np
 from datasets import load_dataset, load_metric
 
-print(os.getcwd())
 import transformers
 from transformers import (
     AutoConfig,
@@ -41,17 +40,12 @@ from transformers import (
     TrainingArguments,
     default_data_collator,
     set_seed,
-    EarlyStoppingCallback,
-    SaveOnBestMetricCallback,
 )
 from transformers.trainer_utils import get_last_checkpoint, is_main_process
 from transformers.utils import check_min_version
-import wandb
-from wandb import AlertLevel
 import loralib as lora
 import copy
-import torch.nn as nn
-import math
+import wandb
 
 # Will error if the minimal version of Transformers is not installed. Remove at your own risks.
 check_min_version("4.4.0")
@@ -69,15 +63,6 @@ task_to_keys = {
 }
 
 logger = logging.getLogger(__name__)
-
-
-def count_parameters(model):
-    return sum(p.numel() for p in model.parameters() if p.requires_grad)
-
-
-def recon_error(original_weight, approx_weight):
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    return torch.linalg.norm(original_weight.to(device) - approx_weight.to(device), "fro")
 
 
 def insert_lora(model, dim, rank, lora_alpha):
@@ -115,156 +100,6 @@ def W_weight_copy(new_model, W_model):
             new_model.roberta.encoder.layer[i].attention.self.value.weight.data.copy_(v_encoder_weight_list[i])
             new_model.roberta.encoder.layer[i].attention.self.query.bias.data.copy_(q_encoder_bias_list[i])
             new_model.roberta.encoder.layer[i].attention.self.value.bias.data.copy_(v_encoder_bias_list[i])
-
-
-def make_W_zero(model):
-    len_of_layers = 12  # len(model.encoder.layers)
-    with torch.no_grad():
-        for i in range(len_of_layers):
-            model.roberta.encoder.layer[i].attention.self.query.weight.data.zero_()
-            model.roberta.encoder.layer[i].attention.self.value.weight.data.zero_()
-    print("AFTER make W 0", model.roberta.encoder.layer[0].attention.self.query.weight.data)
-
-
-def dW_init_by_SVD(model, SVD_model, rank):
-    print(
-        "BEFORE INIT LORA",
-        model.roberta.encoder.layer[0].attention.self.query.lora_A,
-        model.roberta.encoder.layer[0].attention.self.query.lora_B,
-    )
-    w_q_encoder_loraA_weights = []
-    w_q_encoder_loraB_weights = []
-
-    w_v_encoder_loraA_weights = []
-    w_v_encoder_loraB_weights = []
-
-    len_of_layers = 12  # len(SVD_model.roberta.encoder.layer)
-    with torch.no_grad():
-        for i in range(len_of_layers):
-            encoder_q_original_weight = SVD_model.roberta.encoder.layer[i].attention.self.query.weight.data.T
-            encoder_v_original_weight = SVD_model.roberta.encoder.layer[i].attention.self.value.weight.data.T
-
-            encoder_q_u, encoder_q_s, encoder_q_v = torch.linalg.svd(encoder_q_original_weight)
-            encoder_v_u, encoder_v_s, encoder_v_v = torch.linalg.svd(encoder_v_original_weight)
-
-            approx_rank = rank
-
-            # w_q_encoder
-            # torch.Size([768, rank])
-            w_q_encoder_loraA_weights.append(
-                encoder_q_u[:, :approx_rank] @ torch.diag(encoder_q_s[:approx_rank]).sqrt()
-            )
-            # torch.Size([rank, 768])
-            w_q_encoder_loraB_weights.append(
-                torch.diag(encoder_q_s[:approx_rank]).sqrt() @ encoder_q_v[:approx_rank, :]
-            )
-            # w_v_encoder
-            w_v_encoder_loraA_weights.append(
-                encoder_v_u[:, :approx_rank] @ torch.diag(encoder_v_s[:approx_rank]).sqrt()
-            )
-            w_v_encoder_loraB_weights.append(
-                torch.diag(encoder_v_s[:approx_rank]).sqrt() @ encoder_v_v[:approx_rank, :]
-            )
-    og_weight = SVD_model.roberta.encoder.layer[0].attention.self.query.weight.data
-    # insert_lora(SVD_model, 768, approx_rank, lora_alpha)
-
-    with torch.no_grad():
-        for i in range(len_of_layers):
-            model.roberta.encoder.layer[i].attention.self.query.lora_A.copy_(
-                w_q_encoder_loraA_weights[i].transpose(0, 1)
-            )
-            model.roberta.encoder.layer[i].attention.self.query.lora_B.copy_(
-                w_q_encoder_loraB_weights[i].transpose(0, 1)
-            )
-
-            model.roberta.encoder.layer[i].attention.self.value.lora_A.copy_(
-                w_v_encoder_loraA_weights[i].transpose(0, 1)
-            )
-            model.roberta.encoder.layer[i].attention.self.value.lora_B.copy_(
-                w_v_encoder_loraB_weights[i].transpose(0, 1)
-            )
-    print(
-        "AFTER INIT LORA",
-        model.roberta.encoder.layer[0].attention.self.query.lora_A,
-        model.roberta.encoder.layer[0].attention.self.query.lora_B,
-    )
-
-    print(f"OG weight Norm : {torch.linalg.norm(og_weight)}")
-    approx_weight = (
-        model.roberta.encoder.layer[0].attention.self.query.lora_A.T
-        @ model.roberta.encoder.layer[0].attention.self.query.lora_B.T
-    )
-    print(f"recon error between OG and rank_{approx_rank} SVD weight : {recon_error(og_weight,approx_weight)} ")
-
-
-def dW_init_by_WplusAB(model, lora_model):
-    len_of_layers = 12
-    loraA_q_encoder_weight_list = []
-    loraB_q_encoder_weight_list = []
-
-    loraA_v_encoder_weight_list = []
-    loraB_v_encoder_weight_list = []
-
-    with torch.no_grad():
-        for i in range(len_of_layers):
-            loraA_q_encoder_new_weight = lora_model.roberta.encoder.layer[i].attention.self.query.lora_A
-            loraA_q_encoder_weight_list.append(loraA_q_encoder_new_weight)
-            loraB_q_encoder_new_weight = lora_model.roberta.encoder.layer[i].attention.self.query.lora_B
-            loraB_q_encoder_weight_list.append(loraB_q_encoder_new_weight)
-
-            loraA_v_encoder_new_weight = lora_model.roberta.encoder.layer[i].attention.self.value.lora_A
-            loraA_v_encoder_weight_list.append(loraA_v_encoder_new_weight)
-            loraB_v_encoder_new_weight = lora_model.roberta.encoder.layer[i].attention.self.value.lora_B
-            loraB_v_encoder_weight_list.append(loraB_v_encoder_new_weight)
-
-    with torch.no_grad():
-        for i in range(len_of_layers):
-            encoder_q_plus_AB = (
-                lora_model.roberta.encoder.layer[i].attention.self.query.weight.data.T
-                + (loraA_q_encoder_weight_list[i].T @ loraB_q_encoder_weight_list[i].T)
-            ).T
-            encoder_v_plus_AB = (
-                lora_model.roberta.encoder.layer[i].attention.self.value.weight.data.T
-                + (loraA_v_encoder_weight_list[i].T @ loraB_v_encoder_weight_list[i].T)
-            ).T
-
-            model.roberta.encoder.layer[i].attention.self.query.weight.copy_(encoder_q_plus_AB)
-
-            model.roberta.encoder.layer[i].attention.self.value.weight.copy_(encoder_v_plus_AB)
-
-
-def W_init_by_loraAB(model, lora_model):
-    """
-    model의 W weight를 lora_model의 Lora Layer의 weight로 초기화
-    """
-    len_of_layers = 12
-    loraA_q_encoder_weight_list = []
-    loraB_q_encoder_weight_list = []
-
-    loraA_v_encoder_weight_list = []
-    loraB_v_encoder_weight_list = []
-
-    with torch.no_grad():
-        for i in range(len_of_layers):
-            loraA_q_encoder_new_weight = lora_model.roberta.encoder.layer[i].attention.self.query.lora_A
-            loraA_q_encoder_weight_list.append(loraA_q_encoder_new_weight)
-            loraB_q_encoder_new_weight = lora_model.roberta.encoder.layer[i].attention.self.query.lora_B
-            loraB_q_encoder_weight_list.append(loraB_q_encoder_new_weight)
-
-            loraA_v_encoder_new_weight = lora_model.roberta.encoder.layer[i].attention.self.value.lora_A
-            loraA_v_encoder_weight_list.append(loraA_v_encoder_new_weight)
-            loraB_v_encoder_new_weight = lora_model.roberta.encoder.layer[i].attention.self.value.lora_B
-            loraB_v_encoder_weight_list.append(loraB_v_encoder_new_weight)
-
-    with torch.no_grad():
-        for i in range(len_of_layers):
-            model.roberta.encoder.layer[i].attention.self.query.weight.copy_(
-                (loraA_q_encoder_weight_list[i].T @ loraB_q_encoder_weight_list[i].T).T
-            )
-
-            model.roberta.encoder.layer[i].attention.self.value.weight.copy_(
-                (loraA_v_encoder_weight_list[i].T @ loraB_v_encoder_weight_list[i].T).T
-            )
 
 
 @dataclass
@@ -378,15 +213,15 @@ class ModelArguments:
         },
     )
     apply_lora: Optional[bool] = field(
-        default=True,
+        default=False,
         metadata={"help": "Whether to apply LoRA or not."},
     )
     lora_alpha: Optional[int] = field(
-        default=8,
+        default=None,
         metadata={"help": "LoRA alpha"},
     )
     lora_r: Optional[int] = field(
-        default=8,
+        default=None,
         metadata={"help": "LoRA r"},
     )
     lora_path: Optional[str] = field(
@@ -429,12 +264,12 @@ def main():
     # We now keep distinct sets of args, for a cleaner separation of concerns.
 
     parser = HfArgumentParser((ModelArguments, DataTrainingArguments, TrainingArguments))
-    if len(sys.argv) == 2 and sys.argv[1].endswith(".json"):
-        # If we pass only one argument to the script and it's the path to a json file,
-        # let's parse it to get our arguments.
-        model_args, data_args, training_args = parser.parse_json_file(json_file=os.path.abspath(sys.argv[1]))
-    else:
-        model_args, data_args, training_args = parser.parse_args_into_dataclasses()
+    # if len(sys.argv) == 2 and sys.argv[1].endswith(".json"):
+    #     # If we pass only one argument to the script and it's the path to a json file,
+    #     # let's parse it to get our arguments.
+    #     model_args, data_args, training_args = parser.parse_json_file(json_file=os.path.abspath(sys.argv[1]))
+    # else:
+    model_args, data_args, training_args = parser.parse_args_into_dataclasses()
 
     # torch.use_deterministic_algorithms(training_args.use_deterministic_algorithms)
     logger.info("use_deterministic_algorithms: " + str(torch.are_deterministic_algorithms_enabled()))
@@ -553,7 +388,6 @@ def main():
         cache_dir=model_args.cache_dir,
         revision=model_args.model_revision,
         use_auth_token=True if model_args.use_auth_token else None,
-        cls_dropout=0,  # training_args.cls_dropout,
         apply_lora=model_args.apply_lora,
         lora_alpha=model_args.lora_alpha,
         lora_r=model_args.lora_r,
@@ -570,84 +404,27 @@ def main():
         revision=model_args.model_revision,
         use_auth_token=True if model_args.use_auth_token else None,
     )
-
-    model = copy.deepcopy(
-        AutoModelForSequenceClassification.from_pretrained(
-            model_args.model_name_or_path,
-            from_tf=bool(".ckpt" in model_args.model_name_or_path),
-            config=config,
-            cache_dir=model_args.cache_dir,
-            revision=model_args.model_revision,
-            use_auth_token=True if model_args.use_auth_token else None,
-        )
+    model = AutoModelForSequenceClassification.from_pretrained(
+        model_args.model_name_or_path,
+        from_tf=bool(".ckpt" in model_args.model_name_or_path),
+        config=config,
+        cache_dir=model_args.cache_dir,
+        revision=model_args.model_revision,
+        use_auth_token=True if model_args.use_auth_token else None,
     )
-    new_model = copy.deepcopy(
-        AutoModelForSequenceClassification.from_pretrained(
-            model_args.model_name_or_path,
-            from_tf=bool(".ckpt" in model_args.model_name_or_path),
-            config=config,
-            cache_dir=model_args.cache_dir,
-            revision=model_args.model_revision,
-            use_auth_token=True if model_args.use_auth_token else None,
-        )
-    )
+    new_model = copy.deepcopy(model)
 
     insert_lora(model, 768, model_args.lora_r, model_args.lora_alpha)
     W_weight_copy(model, new_model)
+
     trainable_params = []
-    trainable_params.append("lora")
-    lora_state_dict = torch.load(model_args.lora_path)
-    # dW_init_by_SVD(model, new_model, model_args.lora_r)
-    # make_W_zero(model)
-    for i in range(12):
-        model.roberta.encoder.layer[i].attention.self.query.weight.copy_(
-            (
-                lora_state_dict[f"roberta.encoder.layer.{i}.attention.self.query.lora_A"].T
-                @ lora_state_dict[f"roberta.encoder.layer.{i}.attention.self.query.lora_B"].T
-            ).T
-        )
-
-        model.roberta.encoder.layer[i].attention.self.value.weight.copy_(
-            (
-                lora_state_dict[f"roberta.encoder.layer.{i}.attention.self.value.lora_A"].T
-                @ lora_state_dict[f"roberta.encoder.layer.{i}.attention.self.value.lora_B"].T
-            ).T
-        )
-
-    ###
-    # insert_lora(new_model, 768, 16, 16)
-    # # lora_model = copy.deepcopy(model)
-    # if model_args.apply_lora:
-    #     if model_args.lora_path is not None:
-    #         lora_state_dict = torch.load(model_args.lora_path)
-    #         logger.info(f"Apply LoRA state dict from {model_args.lora_path}.")
-    #         logger.info(lora_state_dict.keys())
-    #         new_model.load_state_dict(lora_state_dict, strict=False)
-    # W_weight_copy(new_model, model)
-    # W_init_by_loraAB(model, new_model)
-    print(
-        model.roberta.encoder.layer[0].attention.self.query.lora_A,
-        model.roberta.encoder.layer[0].attention.self.query.lora_B,
-        model.roberta.encoder.layer[0].attention.self.query.weight.data,
-    )
-
-    ###
-
-    if len(trainable_params) > 0:
-        for name, param in model.named_parameters():
-            if name.startswith("deberta") or name.startswith("roberta"):
-                param.requires_grad = False
-                for trainable_param in trainable_params:
-                    if trainable_param in name:
-                        param.requires_grad = True
-                        print(f"Trainalble LAYER NAME from LoRA : {name}")
-                        break
-            else:
-                param.requires_grad = False
-                print(f"Make CL Layer untrainable : {name}")
-                # print(f"Trainalble LAYER NAME : {name}")
-
-    print(f"PARAMETERS : {count_parameters(model)}")
+    if model_args.apply_lora:
+        if model_args.lora_path is not None:
+            lora_state_dict = torch.load(model_args.lora_path)
+            logger.info(f"Apply LoRA state dict from {model_args.lora_path}.")
+            logger.info(lora_state_dict.keys())
+            model.load_state_dict(lora_state_dict, strict=False)
+        trainable_params.append("lora")
 
     if model_args.apply_adapter:
         if model_args.adapter_path is not None:
@@ -677,6 +454,18 @@ def main():
 
     if model_args.apply_bitfit:
         trainable_params.append("bias")
+
+    if len(trainable_params) > 0:
+        for name, param in model.named_parameters():
+            if name.startswith("deberta") or name.startswith("roberta"):
+                param.requires_grad = False
+                for trainable_param in trainable_params:
+                    if trainable_param in name:
+                        param.requires_grad = True
+                        break
+            else:
+                param.requires_grad = True
+
     # Preprocessing the datasets
     if data_args.task_name is not None:
         sentence1_key, sentence2_key = task_to_keys[data_args.task_name]
@@ -803,29 +592,20 @@ def main():
         tokenizer=tokenizer,
         data_collator=data_collator,
     )
-    best_eval_acc = 0.5
-    isBest = True
+
     # Training
     if training_args.do_train:
         wandb.init(
-            group=f"dW init by SVD from HG ckpt",
-            name=f"off-merged_r16+r128{model_args.model_name_or_path}_RANK{model_args.lora_r}",
+            group=f"RTE",
+            name=f"FT_LORA{model_args.model_name_or_path}_{model_args.lora_r}_{data_args.task_name}_mls{data_args.max_seq_length}_batch{training_args.per_device_train_batch_size}",
             config={
-                "learning_rate": 9e-5,
-                "num_train_epochs": 60,
+                "learning_rate": 5e-4,
+                "num_train_epochs": 80,
                 "batch_size": 64,
-                "seed": 0,
-                "lora_r": 128,
+                "lora_r": 8,
             },
         )
-        trainer.add_callback(EarlyStoppingCallback(15))
-        trainer.add_callback(SaveOnBestMetricCallback())
-        config = wandb.config
-        print("### START TRAIN ####", model)
-        model.to(training_args.device)
-        print(f"PARAMETERS : {count_parameters(model)}")
-
-        checkpoint = None  #  "/home/lab/bumjun/lora-training/LoRA/examples/NLU/sst2/r4/model/checkpoint-5797"
+        checkpoint = None
         if last_checkpoint is not None:
             checkpoint = last_checkpoint
         elif os.path.isdir(model_args.model_name_or_path):
@@ -840,13 +620,13 @@ def main():
             data_args.max_train_samples if data_args.max_train_samples is not None else len(train_dataset)
         )
         metrics["train_samples"] = min(max_train_samples, len(train_dataset))
-        if isBest:
-            trainer.save_model()  # Saves the tokenizer too for easy upload
+
+        trainer.save_model()  # Saves the tokenizer too for easy upload
 
         trainer.log_metrics("train", metrics)
         trainer.save_metrics("train", metrics)
         trainer.save_state()
-        wandb.alert("Exception occured at", text=f"Epoch: {trainer.state.epoch+1}")
+
     # Evaluation
     if training_args.do_eval:
         logger.info("*** Evaluate ***")
@@ -866,17 +646,6 @@ def main():
 
             trainer.log_metrics("eval", metrics)
             trainer.save_metrics("eval", metrics)
-            if best_eval_acc > metrics["eval_accuracy"]:
-                print("NEW BEST EVAL ACC")
-                best_eval_acc = metrics["eval_accuracy"]
-                isBest = True
-            else:
-                isBest = False
-            # print("SAVE LORA CKPT")
-            # torch.save(
-            #     lora.lora_state_dict(model),
-            #     f"/home/lab/bumjun/lora-training/LoRA/examples/NLU/sst2/lora/lorackpt_includeCL.bin",
-            # )
 
     if training_args.do_predict:
         logger.info("*** Test ***")
@@ -905,11 +674,6 @@ def main():
                         else:
                             item = label_list[item]
                             writer.write(f"{index}\t{item}\n")
-    if trainer.state.epoch == training_args.num_train_epochs:
-        wandb.alert(
-            title="finish",
-            text="Training Task Finished",
-        )
 
 
 def _mp_fn(index):
@@ -919,102 +683,3 @@ def _mp_fn(index):
 
 if __name__ == "__main__":
     main()
-
-    # with torch.no_grad():
-    #     for i in range(12):
-    #         model.roberta.encoder.layer[i].attention.self.query.weight.copy_(
-    #             (
-    #                 model.roberta.encoder.layer[0].attention.self.query.lora_A.T
-    #                 @ model.roberta.encoder.layer[0].attention.self.query.lora_B.T
-    #             ).T
-    #         )
-
-    #         model.roberta.encoder.layer[i].attention.self.value.weight.copy_(
-    #             (
-    #                 model.roberta.encoder.layer[0].attention.self.value.lora_A.T
-    #                 @ model.roberta.encoder.layer[0].attention.self.value.lora_B.T
-    #             ).T
-    #         )
-
-    # print(
-    #     "########## W Weight ##########",
-    #     model.roberta.encoder.layer[0].attention.self.query.weight.data,
-    # )
-    # with torch.no_grad():
-    #     for i in range(12):
-    #         nn.init.kaiming_uniform_(model.roberta.encoder.layer[0].attention.self.query.lora_A, a=math.sqrt(5))
-    #         nn.init.zeros_(model.roberta.encoder.layer[0].attention.self.query.lora_B)
-    # print("lora_A", model.roberta.encoder.layer[0].attention.self.query.lora_A)
-    # print("lora_B", model.roberta.encoder.layer[0].attention.self.query.lora_B)
-    # print(f"PARAMETERS : {count_parameters(model)}")
-    # make_W_zero(model)
-    # print(
-    #     "########## W Weight ##########",
-    #     model.roberta.encoder.layer[0].attention.self.query.weight.data,
-    # )
-    # W_init_by_loraAB(model, lora_model)
-    # print(
-    #     "########## W Weight after init by LoRA ##########",
-    #     model.roberta.encoder.layer[0].attention.self.query.weight.data,
-    # )
-    # print("After Lora Init")
-    # print("lora_A", lora_model.roberta.encoder.layer[0].attention.self.query.lora_A)
-    # print("lora_B", lora_model.roberta.encoder.layer[0].attention.self.query.lora_B)
-
-    # print(
-    #     "########## W Weight ##########",
-    #     model.roberta.encoder.layer[0].attention.self.query.weight.data,
-    # )
-    # W_init_by_loraAB(model, lora_model)
-    # print(
-    #     "########## W Weight after init by LoRA ##########",
-    #     model.roberta.encoder.layer[0].attention.self.query.weight.data,
-    # )
-    # print(
-    #     recon_error(
-    #         model.roberta.encoder.layer[0].attention.self.query.weight,
-    #         (
-    #             lora_model.roberta.encoder.layer[0].attention.self.query.lora_A.T
-    #             @ lora_model.roberta.encoder.layer[0].attention.self.query.lora_B.T
-    #         ).T,
-    #     )
-    # )
-    # q_encoder_weight_list = []
-    # v_encoder_weight_list = []
-    # print(
-    #     "########## W Weight ##########",
-    #     model.roberta.encoder.layer[0].attention.self.query.weight.data,
-    #     model.roberta.encoder.layer[0].attention.self.query.weight.data.shape,
-    # )
-    # for i in range(12):
-    #     q_encoder_new_weight = model.roberta.encoder.layer[i].attention.self.query.weight.data
-    #     q_encoder_weight_list.append(q_encoder_new_weight)
-    #     v_encoder_new_weight = model.roberta.encoder.layer[i].attention.self.value.weight.data
-    #     v_encoder_weight_list.append(v_encoder_new_weight)
-    # insert_lora(model, 768, model_args.lora_r, model_args.lora_alpha)
-    # print(
-    #     "########## W Weight after insert ##########",
-    #     model.roberta.encoder.layer[0].attention.self.query.weight.data,
-    #     model.roberta.encoder.layer[0].attention.self.query.weight.data.shape,
-    # )
-    # print(model.roberta.encoder.layer[0].attention.self.query.lora_A)
-    # print(model.roberta.encoder.layer[0].attention.self.query.lora_B)
-    # with torch.no_grad():
-    #     for i in range(12):
-    #         model.roberta.encoder.layer[i].attention.self.query.weight.data.copy_(q_encoder_weight_list[i])
-    #         model.roberta.encoder.layer[i].attention.self.value.weight.data.copy_(v_encoder_weight_list[i])
-    # print("########## W Weight after copy ##########", model.roberta.encoder.layer[0].attention.self.query.weight.data)
-    # print(f"PARAMETERS : {count_parameters(model)}")
-    # print("W Weight", model.roberta.encoder.layer[0].attention.self.query.weight.data)
-    # print("output Weight", model.roberta.encoder.layer[0].output.dense.weight.data)
-    # print("CL Weight", model.classifier.dense.weight.data)
-    # # make_W_zero(model)
-    # ###
-    # for name, param in model.named_parameters():
-    #     if "attention" not in name:
-    #         param.data.fill_(0)
-    ###
-    # print("After Make F Zero")
-    # print(model.roberta.encoder.layer[0].attention.self.query.weight.data)
-    # print("output Weight", model.roberta.encoder.layer[0].output.dense.weight.data)
-    # print("CL Weight", model.classifier.dense.weight.data)
